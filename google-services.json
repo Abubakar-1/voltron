@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "946796983752",
+    "project_id": "voltron-f62e0",
+    "storage_bucket": "voltron-f62e0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:946796983752:android:85cec99f845de234ca3cfd",
+        "android_client_info": {
+          "package_name": "com.yourcompany.voltron"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDY0iVYcyZ7sxNu9M709GbvzOWVHbxNpi0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

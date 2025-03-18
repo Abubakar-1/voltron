@@ -3,15 +3,19 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": [
-        "./*"
-      ]
+      "@/*": ["./*"]
     }
   },
   "include": [
     "**/*.ts",
     "**/*.tsx",
     ".expo/types/**/*.ts",
-    "expo-env.d.ts"
+    "expo-env.d.ts",
+    "screens/SettingsScreen.jsx",
+    "screens/AppliancesScreen.jsx",
+
+    "app/index.jsx",
+    "screens/ScheduleScreen.jsx",
+    "screens/AnalyticsScreen.jsx"
   ]
 }
