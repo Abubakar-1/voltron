@@ -1,131 +1,151 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
+'use client';
 
-import React from 'react';
-import type {PropsWithChildren} from 'react';
-import {
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  useColorScheme,
-  View,
-} from 'react-native';
+import {SafeAreaView, StatusBar, StyleSheet, View, Text} from 'react-native';
+import {GestureHandlerRootView} from 'react-native-gesture-handler';
+import {BluetoothProvider} from './context/bluetooth-context';
+import {BluetoothPermissions} from './components/bluetooth-permissions';
+import {DashboardScreen} from './screens/dashboard-screen';
+import {ControlScreen} from './screens/control-screen';
+import {SettingsScreen} from './screens/settings-screen';
+import {HistoryScreen} from './screens/history-screen';
+import {useState, useEffect} from 'react';
+import {CustomNavBar} from './components/custom-nav-bar';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
+function ConnectionStatus() {
+  const {isConnected, connectedDevice, connectionError} = useBluetooth();
 
-type SectionProps = PropsWithChildren<{
-  title: string;
-}>;
-
-function Section({children, title}: SectionProps): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
   return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
+    <View style={styles.header}>
+      <Text style={styles.headerTitle}>Energy Monitor</Text>
+      <View style={styles.connectionStatus}>
+        <View
+          style={[
+            styles.statusDot,
+            isConnected ? styles.connected : styles.disconnected,
+          ]}
+        />
+        <Text style={styles.statusText}>
+          {isConnected
+            ? `Connected to ${
+                connectedDevice?.name || connectedDevice?.address || 'device'
+              }`
+            : connectionError
+            ? 'Connection Error'
+            : 'Disconnected'}
+        </Text>
+      </View>
     </View>
   );
 }
 
-function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
+export default function App() {
+  const [activeScreen, setActiveScreen] = useState('Dashboard');
+  const [appReady, setAppReady] = useState(false);
 
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
+  // Wait for the app to be fully mounted before showing content
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAppReady(true);
+      console.log('App fully mounted, ready for permission requests');
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Render the active screen based on the selected tab
+  const renderScreen = () => {
+    switch (activeScreen) {
+      case 'Dashboard':
+        return <DashboardScreen />;
+      case 'Control':
+        return <ControlScreen />;
+      case 'Settings':
+        return <SettingsScreen />;
+      case 'History':
+        return <HistoryScreen />;
+      default:
+        return <DashboardScreen />;
+    }
   };
 
-  /*
-   * To keep the template simple and small we're adding padding to prevent view
-   * from rendering under the System UI.
-   * For bigger apps the recommendation is to use `react-native-safe-area-context`:
-   * https://github.com/AppAndFlow/react-native-safe-area-context
-   *
-   * You can read more about it here:
-   * https://github.com/react-native-community/discussions-and-proposals/discussions/827
-   */
-  const safePadding = '5%';
+  if (!appReady) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text>Loading Energy Monitor...</Text>
+      </View>
+    );
+  }
 
   return (
-    <View style={backgroundStyle}>
-      <StatusBar
-        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-        backgroundColor={backgroundStyle.backgroundColor}
-      />
-      <ScrollView
-        style={backgroundStyle}>
-        <View style={{paddingRight: safePadding}}>
-          <Header/>
-        </View>
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-            paddingHorizontal: safePadding,
-            paddingBottom: safePadding,
-          }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
-          </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
-        </View>
-      </ScrollView>
-    </View>
+    <GestureHandlerRootView style={{flex: 1}}>
+      <BluetoothProvider>
+        <SafeAreaView style={styles.container}>
+          <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
+          <BluetoothPermissions />
+          <ConnectionStatus />
+
+          <View style={styles.screenContainer}>{renderScreen()}</View>
+
+          <CustomNavBar
+            activeScreen={activeScreen}
+            onScreenChange={setActiveScreen}
+          />
+        </SafeAreaView>
+      </BluetoothProvider>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
   },
-  sectionTitle: {
-    fontSize: 24,
-    fontWeight: '600',
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
   },
-  sectionDescription: {
-    marginTop: 8,
+  screenContainer: {
+    flex: 1,
+    marginBottom: 60, // Space for the navbar
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: 'white',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+  },
+  headerTitle: {
     fontSize: 18,
-    fontWeight: '400',
+    fontWeight: 'bold',
   },
-  highlight: {
-    fontWeight: '700',
+  connectionStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+  connected: {
+    backgroundColor: '#10b981',
+  },
+  disconnected: {
+    backgroundColor: '#ef4444',
+  },
+  statusText: {
+    fontSize: 14,
   },
 });
 
-export default App;
+import {useBluetooth} from './context/bluetooth-context';
