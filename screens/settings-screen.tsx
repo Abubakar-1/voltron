@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  FlatList,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import {useBluetooth} from '../context/bluetooth-context';
@@ -160,73 +161,71 @@ export function SettingsScreen() {
           )}
 
           {!isConnected ? (
-            <>
-              <View style={styles.buttonRow}>
-                <TouchableOpacity
-                  style={[styles.button, styles.primaryButton]}
-                  onPress={() => scan()}
-                  disabled={isScanning}>
-                  <Text style={styles.buttonText}>
-                    {isScanning ? 'Scanning...' : 'Scan Paired'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.button, styles.primaryButton]}
-                  onPress={() => scanForUnpaired()}
-                  disabled={isScanning}>
-                  <Text style={styles.buttonText}>Discover New</Text>
-                </TouchableOpacity>
-              </View>
-              <ScrollView>
-                {devices.length > 0 && (
-                  <View style={styles.deviceList}>
-                    <Text style={styles.deviceListTitle}>Paired Devices</Text>
-                    <View style={styles.deviceListContainer}>
-                      {devices.map(device => (
-                        <View key={device.id} style={styles.deviceItem}>
-                          <Text style={styles.deviceName}>
-                            {device.name || device.address}
-                          </Text>
-                          <TouchableOpacity
-                            style={[
-                              styles.button,
-                              styles.smallButton,
-                              styles.primaryButton,
-                            ]}
-                            onPress={() => connect(device.id)}>
-                            <Text style={styles.buttonText}>Connect</Text>
-                          </TouchableOpacity>
-                        </View>
-                      ))}
+            <FlatList
+              data={[...devices, ...unpairedDevices]}
+              keyExtractor={item => item.id}
+              ListHeaderComponent={() => (
+                <View style={styles.buttonRow}>
+                  <TouchableOpacity
+                    style={[styles.button, styles.primaryButton]}
+                    onPress={() => scan()}
+                    disabled={isScanning}>
+                    <Text style={styles.buttonText}>
+                      {isScanning ? 'Scanning...' : 'Scan Paired'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.button, styles.primaryButton]}
+                    onPress={() => scanForUnpaired()}
+                    disabled={isScanning}>
+                    <Text style={styles.buttonText}>Discover New</Text>
+                  </TouchableOpacity>
+                  {devices.length > 0 && (
+                    <View style={styles.deviceList}>
+                      <Text style={styles.deviceListTitle}>Paired Devices</Text>
                     </View>
-                  </View>
-                )}
-              </ScrollView>
-
-              {unpairedDevices.length > 0 && (
-                <View style={styles.deviceList}>
-                  <Text style={styles.deviceListTitle}>Discovered Devices</Text>
-                  <View style={styles.deviceListContainer}>
-                    {unpairedDevices.map(device => (
-                      <View key={device.id} style={styles.deviceItem}>
-                        <Text style={styles.deviceName}>
-                          {device.name || device.address}
-                        </Text>
-                        <TouchableOpacity
-                          style={[
-                            styles.button,
-                            styles.smallButton,
-                            styles.primaryButton,
-                          ]}
-                          onPress={() => pairDevice(device.id)}>
-                          <Text style={styles.buttonText}>Pair</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </View>
+                  )}
                 </View>
               )}
-            </>
+              renderItem={({item}) => {
+                const isPaired = devices.some(device => device.id === item.id);
+                return (
+                  <View style={styles.deviceItem}>
+                    <Text style={styles.deviceName}>
+                      {item.name || item.address}
+                    </Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.button,
+                        styles.smallButton,
+                        styles.primaryButton,
+                      ]}
+                      onPress={() =>
+                        isPaired ? connect(item.id) : pairDevice(item.id)
+                      }>
+                      <Text style={styles.buttonText}>
+                        {isPaired ? 'Connect' : 'Pair'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }}
+              ListFooterComponent={() =>
+                unpairedDevices.length > 0 && (
+                  <View style={styles.deviceList}>
+                    <Text style={styles.deviceListTitle}>
+                      Discovered Devices
+                    </Text>
+                  </View>
+                )
+              }
+              ListEmptyComponent={() => (
+                <Text style={{textAlign: 'center', marginTop: 20}}>
+                  No devices found
+                </Text>
+              )}
+              contentContainerStyle={{paddingBottom: 20}}
+            />
           ) : (
             <>
               <Text style={styles.connectedDevice}>
