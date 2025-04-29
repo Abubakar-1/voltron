@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import {useBluetooth} from '../context/bluetooth-context';
-import Icon from 'react-native-vector-icons/Feather';
+// import Icon from '@react-native-vector-icons/Feather';
 
 export function SettingsScreen() {
   const {
@@ -127,7 +127,7 @@ export function SettingsScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleContainer}>
-            <Icon name="bluetooth" size={16} color="#0070f3" />
+            {/* <Icon name="bluetooth" size={16} color="#0070f3" /> */}
             <Text style={styles.cardTitle}>Device Connection</Text>
           </View>
           {isConnected && (
@@ -242,12 +242,12 @@ export function SettingsScreen() {
                   style={[styles.button, styles.primaryButton]}
                   onPress={() => sendCommand('STATUS')}>
                   <View style={styles.buttonContent}>
-                    <Icon
+                    {/* <Icon
                       name="refresh-cw"
                       size={16}
                       color="white"
                       style={styles.buttonIcon}
-                    />
+                    /> */}
                     <Text style={styles.buttonText}>Refresh</Text>
                   </View>
                 </TouchableOpacity>
@@ -260,7 +260,7 @@ export function SettingsScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleContainer}>
-            <Icon name="sliders" size={16} color="#0070f3" />
+            {/* <Icon name="sliders" size={16} color="#0070f3" /> */}
             <Text style={styles.cardTitle}>System Settings</Text>
           </View>
         </View>
@@ -308,12 +308,12 @@ export function SettingsScreen() {
             onPress={resetEnergy}
             disabled={!isConnected}>
             <View style={styles.buttonContent}>
-              <Icon
+              {/* <Icon
                 name="rotate-ccw"
                 size={16}
                 color="white"
                 style={styles.buttonIcon}
-              />
+              /> */}
               <Text style={styles.buttonText}>Reset Energy Counters</Text>
             </View>
           </TouchableOpacity>

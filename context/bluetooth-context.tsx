@@ -8,7 +8,7 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import {Platform} from 'react-native';
+import {Platform, PermissionsAndroid} from 'react-native';
 import RNBluetoothClassic, {
   type BluetoothDevice,
   type BluetoothEventSubscription,
@@ -39,6 +39,11 @@ interface BluetoothContextType {
   lastUpdated: Date | null;
   reconnect: () => Promise<void>;
   connectionError: string | null;
+  connectionStatus: 'connected' | 'connecting' | 'disconnected';
+  lastErrorTime: Date | null;
+  signalStrength: number; // 0-100 signal strength indicator
+  bufferedCommands: number; // Number of commands waiting in buffer
+  setKeepAliveEnabled: (enabled: boolean) => void; // Control keep-alive
 }
 
 // Create the context with default values
@@ -59,7 +64,20 @@ const BluetoothContext = createContext<BluetoothContextType>({
   lastUpdated: null,
   reconnect: async () => {},
   connectionError: null,
+  connectionStatus: 'disconnected',
+  lastErrorTime: null,
+  signalStrength: 0,
+  bufferedCommands: 0,
+  setKeepAliveEnabled: () => {},
 });
+
+// Buffer item interface
+interface BufferedCommand {
+  command: string;
+  timestamp: number;
+  priority: 'high' | 'normal' | 'low';
+  retries: number;
+}
 
 // Convert BluetoothNativeDevice to our context device format
 const convertDevice = (
@@ -84,6 +102,41 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
   const [receivedData, setReceivedData] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<
+    'connected' | 'connecting' | 'disconnected'
+  >('disconnected');
+  const [lastErrorTime, setLastErrorTime] = useState<Date | null>(null);
+  const [signalStrength, setSignalStrength] = useState<number>(0);
+  const [bufferedCommands, setBufferedCommands] = useState<number>(0);
+  const [keepAliveEnabled, setKeepAliveEnabled] = useState<boolean>(true);
+
+  // Track reconnection attempts to prevent infinite loops
+  const reconnectionAttemptsRef = useRef(0);
+  const maxReconnectionAttempts = 5;
+  const reconnectingRef = useRef(false);
+
+  // Connection stability tracking
+  const connectionStateRef = useRef<boolean>(false);
+  const connectionCheckCountRef = useRef<number>(0);
+  const lastDisconnectTimeRef = useRef<number>(0);
+  const stableConnectionThreshold = 3; // Number of successful checks before considering connection stable
+  const connectionGracePeriod = 5000; // 5 seconds grace period before reconnecting
+
+  // Data buffering
+  const dataBufferRef = useRef<BufferedCommand[]>([]);
+  const MAX_BUFFER_SIZE = 100;
+  const MAX_BUFFER_AGE_MS = 300000; // 5 minutes
+  const MAX_RETRIES = 3;
+
+  // Flow control
+  const transmissionInProgressRef = useRef<boolean>(false);
+  const lastTransmissionTimeRef = useRef<number>(0);
+  const minTransmissionIntervalMs = 50; // Minimum 50ms between transmissions
+
+  // Signal strength tracking
+  const rssiCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const consecutiveTimeoutsRef = useRef<number>(0);
+  const MAX_CONSECUTIVE_TIMEOUTS = 3;
 
   // Keep track of the last connected device ID for reconnection
   const lastConnectedDeviceIdRef = useRef<string | null>(null);
@@ -92,22 +145,328 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
   const dataSubscriptionRef = useRef<BluetoothEventSubscription | null>(null);
   const connectedDeviceRef = useRef<BluetoothDevice | null>(null);
 
+  // Keep-alive interval reference
+  const keepAliveIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
   // Check if we're running on a real device
   const isRealDevice = Platform.OS === 'android' || Platform.OS === 'ios';
 
-  // Get mock implementation
-  // const { mockDevices, mockUnpairedDevices } = createMockBluetoothImplementation()
+  // Request Bluetooth permissions properly
+  const requestBluetoothPermissions = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        // For Android 12+ (API level 31+)
+        if (Platform.Version >= 31) {
+          const bluetoothScan = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            {
+              title: 'Bluetooth Scan Permission',
+              message:
+                'This app needs permission to scan for Bluetooth devices.',
+              buttonNeutral: 'Ask Me Later',
+              buttonNegative: 'Cancel',
+              buttonPositive: 'OK',
+            },
+          );
 
-  // Initialize with mock data for development
-  // useEffect(() => {
-  //   // In a real app, you would check if Bluetooth is available
-  //   console.log("Initializing Bluetooth context")
+          const bluetoothConnect = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+            {
+              title: 'Bluetooth Connect Permission',
+              message:
+                'This app needs permission to connect to Bluetooth devices.',
+              buttonNeutral: 'Ask Me Later',
+              buttonNegative: 'Cancel',
+              buttonPositive: 'OK',
+            },
+          );
 
-  //   // Set mock devices for development
-  //   setDevices(mockDevices)
-  // }, [])
+          return (
+            bluetoothScan === PermissionsAndroid.RESULTS.GRANTED &&
+            bluetoothConnect === PermissionsAndroid.RESULTS.GRANTED
+          );
+        }
+        // For Android 6.0+ (API level 23+) but below Android 12
+        else if (Platform.Version >= 23) {
+          const fineLocation = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+            {
+              title: 'Location Permission',
+              message:
+                'This app needs access to your location to scan for Bluetooth devices.',
+              buttonNeutral: 'Ask Me Later',
+              buttonNegative: 'Cancel',
+              buttonPositive: 'OK',
+            },
+          );
 
-  // Check connection status periodically
+          return fineLocation === PermissionsAndroid.RESULTS.GRANTED;
+        }
+      } catch (error) {
+        console.error('Error requesting Bluetooth permissions:', error);
+        return false;
+      }
+    }
+
+    // iOS or older Android doesn't need runtime permissions
+    return true;
+  };
+
+  // Start keep-alive mechanism
+  const startKeepAlive = () => {
+    // Clear any existing interval
+    if (keepAliveIntervalRef.current) {
+      clearInterval(keepAliveIntervalRef.current);
+      keepAliveIntervalRef.current = null;
+    }
+
+    if (!keepAliveEnabled) {
+      return;
+    }
+
+    keepAliveIntervalRef.current = setInterval(() => {
+      if (isConnected && connectedDeviceRef.current) {
+        // Send a small keep-alive packet that won't interfere with normal operation
+        sendCommand('PING', 'low').catch(err => {
+          console.log('Keep-alive failed:', err);
+        });
+      }
+    }, 15000); // Every 15 seconds
+
+    return () => {
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+      }
+    };
+  };
+
+  // Check signal strength periodically
+  const startSignalStrengthMonitoring = () => {
+    if (rssiCheckIntervalRef.current) {
+      clearInterval(rssiCheckIntervalRef.current);
+    }
+
+    rssiCheckIntervalRef.current = setInterval(async () => {
+      if (
+        isConnected &&
+        connectedDeviceRef.current &&
+        Platform.OS === 'android'
+      ) {
+        try {
+          // This is Android-specific and may not be available on all devices
+          const rssi = await connectedDeviceRef.current.getRssi?.();
+          if (rssi !== undefined) {
+            // RSSI typically ranges from -100 (very weak) to 0 (very strong)
+            // Convert to a 0-100 scale for easier understanding
+            const strengthPercent = Math.max(
+              0,
+              Math.min(100, Math.round((rssi + 100) * 1.25)),
+            );
+            setSignalStrength(strengthPercent);
+
+            // Reset timeout counter on successful RSSI check
+            consecutiveTimeoutsRef.current = 0;
+          }
+        } catch (error) {
+          console.log('Error getting RSSI:', error);
+          consecutiveTimeoutsRef.current++;
+
+          // If we have too many consecutive timeouts, the connection might be unstable
+          if (consecutiveTimeoutsRef.current >= MAX_CONSECUTIVE_TIMEOUTS) {
+            console.log(
+              'Multiple RSSI check failures, connection may be unstable',
+            );
+            setSignalStrength(prev => Math.max(0, prev - 20)); // Decrease signal strength indicator
+          }
+        }
+      } else {
+        setSignalStrength(0);
+      }
+    }, 10000); // Check every 10 seconds
+
+    return () => {
+      if (rssiCheckIntervalRef.current) {
+        clearInterval(rssiCheckIntervalRef.current);
+        rssiCheckIntervalRef.current = null;
+      }
+    };
+  };
+
+  // Process buffered commands
+  const processBufferedCommands = async () => {
+    if (
+      dataBufferRef.current.length === 0 ||
+      !isConnected ||
+      transmissionInProgressRef.current
+    ) {
+      return;
+    }
+
+    // Sort by priority (high first) and then by timestamp (oldest first)
+    const sortedBuffer = [...dataBufferRef.current].sort((a, b) => {
+      if (a.priority !== b.priority) {
+        return a.priority === 'high'
+          ? -1
+          : b.priority === 'high'
+          ? 1
+          : a.priority === 'normal'
+          ? -1
+          : 1;
+      }
+      return a.timestamp - b.timestamp;
+    });
+
+    // Process the next command
+    const nextCommand = sortedBuffer[0];
+
+    // Check if we need to wait before sending (flow control)
+    const now = Date.now();
+    const timeSinceLastTransmission = now - lastTransmissionTimeRef.current;
+    if (timeSinceLastTransmission < minTransmissionIntervalMs) {
+      // Schedule retry after the minimum interval
+      setTimeout(
+        processBufferedCommands,
+        minTransmissionIntervalMs - timeSinceLastTransmission,
+      );
+      return;
+    }
+
+    // Remove from buffer
+    dataBufferRef.current = dataBufferRef.current.filter(
+      cmd =>
+        cmd.command !== nextCommand.command ||
+        cmd.timestamp !== nextCommand.timestamp,
+    );
+    setBufferedCommands(dataBufferRef.current.length);
+
+    // Send the command
+    transmissionInProgressRef.current = true;
+    try {
+      if (isRealDevice && connectedDeviceRef.current) {
+        // Add newline if needed
+        const formattedCommand = nextCommand.command.endsWith('\n')
+          ? nextCommand.command
+          : nextCommand.command + '\n';
+
+        await connectedDeviceRef.current.write(formattedCommand);
+        lastTransmissionTimeRef.current = Date.now();
+
+        // Successful command indicates good connection
+        if (nextCommand.priority !== 'low') {
+          // Don't count keep-alive pings
+          connectionCheckCountRef.current = stableConnectionThreshold;
+        }
+      }
+    } catch (error) {
+      console.error('Error sending buffered command:', error);
+
+      // If it's a high priority command or hasn't been retried too many times, add it back to the buffer
+      if (
+        nextCommand.retries < MAX_RETRIES &&
+        (nextCommand.priority === 'high' || nextCommand.priority === 'normal')
+      ) {
+        dataBufferRef.current.push({
+          ...nextCommand,
+          retries: nextCommand.retries + 1,
+        });
+        setBufferedCommands(dataBufferRef.current.length);
+      }
+
+      // Check connection status
+      if (connectedDeviceRef.current) {
+        try {
+          const stillConnected = await connectedDeviceRef.current.isConnected();
+          if (!stillConnected && isConnected) {
+            handleDisconnection('Connection lost while sending command');
+          }
+        } catch (err) {
+          console.error('Error checking connection after send failure:', err);
+        }
+      }
+    } finally {
+      transmissionInProgressRef.current = false;
+
+      // Process next command if there are more in the buffer
+      if (dataBufferRef.current.length > 0) {
+        // Add a small delay for flow control
+        setTimeout(processBufferedCommands, minTransmissionIntervalMs);
+      }
+    }
+  };
+
+  // Handle disconnection with proper error message
+  const handleDisconnection = (errorMessage: string) => {
+    // Update connection state
+    connectionStateRef.current = false;
+    setIsConnected(false);
+    setConnectionStatus('disconnected');
+    setConnectionError(errorMessage);
+    setLastErrorTime(new Date());
+
+    // Record the time of disconnection
+    lastDisconnectTimeRef.current = Date.now();
+
+    // Wait for grace period before attempting reconnection
+    if (!reconnectingRef.current) {
+      console.log(
+        'Connection lost, waiting for grace period before reconnecting...',
+      );
+      setTimeout(() => {
+        // Only reconnect if we're still disconnected after the grace period
+        if (!connectionStateRef.current && !reconnectingRef.current) {
+          console.log('Grace period ended, attempting reconnection');
+          reconnect();
+        }
+      }, connectionGracePeriod);
+    }
+  };
+
+  // Reset reconnection attempts counter when successfully connected
+  useEffect(() => {
+    if (isConnected) {
+      reconnectionAttemptsRef.current = 0;
+      reconnectingRef.current = false;
+      connectionStateRef.current = true;
+
+      // Start keep-alive when connected
+      startKeepAlive();
+
+      // Start signal strength monitoring
+      startSignalStrengthMonitoring();
+
+      // Process any buffered commands
+      if (dataBufferRef.current.length > 0) {
+        processBufferedCommands();
+      }
+    } else {
+      connectionStateRef.current = false;
+
+      // Clear keep-alive when disconnected
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+      }
+
+      // Clear signal strength monitoring
+      if (rssiCheckIntervalRef.current) {
+        clearInterval(rssiCheckIntervalRef.current);
+        rssiCheckIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      // Clean up intervals
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+      }
+      if (rssiCheckIntervalRef.current) {
+        clearInterval(rssiCheckIntervalRef.current);
+      }
+    };
+  }, [isConnected, keepAliveEnabled]);
+
+  // Check connection status periodically with debouncing
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
 
@@ -119,16 +478,34 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
             const stillConnected =
               await connectedDeviceRef.current.isConnected();
 
-            if (!stillConnected && isConnected) {
-              setIsConnected(false);
-              setConnectionError('Connection lost. Attempting to reconnect...');
+            if (stillConnected) {
+              // Increment successful connection check count
+              connectionCheckCountRef.current++;
 
-              // Try to reconnect
-              reconnect();
+              // If we've had enough successful checks, consider the connection stable
+              if (
+                connectionCheckCountRef.current >= stableConnectionThreshold
+              ) {
+                // Only update UI state if there was a change to avoid re-renders
+                if (!isConnected) {
+                  setIsConnected(true);
+                  setConnectionStatus('connected');
+                  setConnectionError(null);
+                }
+              }
+            } else {
+              // Reset the successful check counter
+              connectionCheckCountRef.current = 0;
+
+              // Handle disconnection with grace period
+              if (isConnected) {
+                handleDisconnection('Connection lost. Waiting to reconnect...');
+              }
             }
           }
         } catch (error) {
           console.error('Error checking connection status:', error);
+          connectionCheckCountRef.current = 0;
         }
       }, 5000); // Check every 5 seconds
     }
@@ -149,8 +526,24 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
 
     // Set up new data listener
     dataSubscriptionRef.current = device.onDataReceived(data => {
+      // Receiving data is a good indicator of an active connection
+      connectionCheckCountRef.current = stableConnectionThreshold; // Consider connection stable immediately when receiving data
+
+      // Update signal strength on data receipt for more responsive UI
+      setSignalStrength(prev => Math.min(100, prev + 5));
+
       setReceivedData(prev => prev + data.data);
       setLastUpdated(new Date());
+
+      // Ensure connection state is updated if we're receiving data
+      if (!isConnected) {
+        setIsConnected(true);
+        setConnectionStatus('connected');
+        setConnectionError(null);
+      }
+
+      // Reset consecutive timeouts since we're receiving data
+      consecutiveTimeoutsRef.current = 0;
     });
   };
 
@@ -160,6 +553,17 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
       try {
         if (isRealDevice) {
           console.log('Checking Bluetooth status...');
+
+          // Request permissions first
+          const permissionsGranted = await requestBluetoothPermissions();
+          if (!permissionsGranted) {
+            console.log('Bluetooth permissions not granted');
+            setConnectionError(
+              'Bluetooth permissions not granted. Please grant permissions in app settings.',
+            );
+            setLastErrorTime(new Date());
+            return;
+          }
 
           try {
             const enabled = await RNBluetoothClassic.isBluetoothEnabled();
@@ -172,10 +576,16 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
                 console.log('Bluetooth has been enabled');
               } catch (error) {
                 console.log('Please enable Bluetooth to use this app');
+                setConnectionError('Please enable Bluetooth to use this app');
+                setLastErrorTime(new Date());
               }
             }
           } catch (error) {
             console.error('Error checking Bluetooth status:', error);
+            setConnectionError(
+              'Error checking Bluetooth status. Please ensure Bluetooth is available.',
+            );
+            setLastErrorTime(new Date());
           }
         }
       } catch (error) {
@@ -198,6 +608,14 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
           .disconnect()
           .catch(error => console.error('Error disconnecting:', error));
       }
+
+      // Clear intervals
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+      }
+      if (rssiCheckIntervalRef.current) {
+        clearInterval(rssiCheckIntervalRef.current);
+      }
     };
   }, []);
 
@@ -208,6 +626,18 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
       console.log('Starting Bluetooth scan...');
 
       if (isRealDevice) {
+        // Request permissions first
+        const permissionsGranted = await requestBluetoothPermissions();
+        if (!permissionsGranted) {
+          console.log('Bluetooth permissions not granted');
+          setConnectionError(
+            'Bluetooth permissions not granted. Please grant permissions in app settings.',
+          );
+          setLastErrorTime(new Date());
+          setIsScanning(false);
+          return;
+        }
+
         try {
           // Check if Bluetooth is enabled
           const enabled = await RNBluetoothClassic.isBluetoothEnabled();
@@ -217,6 +647,8 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
               console.log('Bluetooth has been enabled');
             } catch (error) {
               console.log('Please enable Bluetooth to scan for devices');
+              setConnectionError('Please enable Bluetooth to scan for devices');
+              setLastErrorTime(new Date());
               setIsScanning(false);
               return;
             }
@@ -237,26 +669,13 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
             'Failed to scan for devices: ' +
               (error instanceof Error ? error.message : String(error)),
           );
+          setLastErrorTime(new Date());
         }
-      } else {
-        // Mock implementation for web/development
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        setDevices([
-          {
-            id: '00:11:22:33:44:55',
-            name: 'ESP32 Energy Monitor',
-            address: '00:11:22:33:44:55',
-          },
-          {
-            id: 'AA:BB:CC:DD:EE:FF',
-            name: 'BT Device',
-            address: 'AA:BB:CC:DD:EE:FF',
-          },
-        ]);
       }
     } catch (error) {
       console.error('Error scanning for devices:', error);
       setConnectionError('Failed to scan for devices');
+      setLastErrorTime(new Date());
     } finally {
       setIsScanning(false);
     }
@@ -269,6 +688,18 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
       console.log('Starting discovery for unpaired devices...');
 
       if (isRealDevice) {
+        // Request permissions first
+        const permissionsGranted = await requestBluetoothPermissions();
+        if (!permissionsGranted) {
+          console.log('Bluetooth permissions not granted');
+          setConnectionError(
+            'Bluetooth permissions not granted. Please grant permissions in app settings.',
+          );
+          setLastErrorTime(new Date());
+          setIsScanning(false);
+          return;
+        }
+
         try {
           // Check if Bluetooth is enabled
           const enabled = await RNBluetoothClassic.isBluetoothEnabled();
@@ -277,6 +708,8 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
               await RNBluetoothClassic.requestBluetoothEnabled();
             } catch (error) {
               console.log('Please enable Bluetooth to scan for devices');
+              setConnectionError('Please enable Bluetooth to scan for devices');
+              setLastErrorTime(new Date());
               setIsScanning(false);
               return;
             }
@@ -323,23 +756,14 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
             'Failed to discover devices: ' +
               (error instanceof Error ? error.message : String(error)),
           );
+          setLastErrorTime(new Date());
           setIsScanning(false);
         }
-      } else {
-        // Mock implementation for web/development
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        setUnpairedDevices([
-          {
-            id: '11:22:33:44:55:66',
-            name: 'New Device',
-            address: '11:22:33:44:55:66',
-          },
-        ]);
-        setIsScanning(false);
       }
     } catch (error) {
       console.error('Error discovering unpaired devices:', error);
       setConnectionError('Failed to discover unpaired devices');
+      setLastErrorTime(new Date());
       setIsScanning(false);
     }
   };
@@ -350,6 +774,17 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
       console.log('Attempting to pair with device:', deviceId);
 
       if (isRealDevice) {
+        // Request permissions first
+        const permissionsGranted = await requestBluetoothPermissions();
+        if (!permissionsGranted) {
+          console.log('Bluetooth permissions not granted');
+          setConnectionError(
+            'Bluetooth permissions not granted. Please grant permissions in app settings.',
+          );
+          setLastErrorTime(new Date());
+          return;
+        }
+
         try {
           // Find the device in the unpaired list
           const device = unpairedDevices.find(d => d.id === deviceId);
@@ -377,26 +812,36 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
             'Failed to pair with device: ' +
               (error instanceof Error ? error.message : String(error)),
           );
-        }
-      } else {
-        // Mock implementation for web/development
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        const device = unpairedDevices.find(d => d.id === deviceId);
-        if (device) {
-          setDevices(prev => [...prev, device]);
-          setUnpairedDevices(prev => prev.filter(d => d.id !== deviceId));
+          setLastErrorTime(new Date());
         }
       }
     } catch (error) {
       console.error('Error pairing device:', error);
       setConnectionError('Failed to pair with device');
+      setLastErrorTime(new Date());
     }
   };
 
   const connect = async (deviceId: string) => {
     try {
+      // Reset connection check counter
+      connectionCheckCountRef.current = 0;
+
       setConnectionError(null);
+      setConnectionStatus('connecting');
       console.log('Connecting to device:', deviceId);
+
+      // Request permissions first
+      const permissionsGranted = await requestBluetoothPermissions();
+      if (!permissionsGranted) {
+        console.log('Bluetooth permissions not granted');
+        setConnectionError(
+          'Bluetooth permissions not granted. Please grant permissions in app settings.',
+        );
+        setLastErrorTime(new Date());
+        setConnectionStatus('disconnected');
+        return;
+      }
 
       // Find the device in the list
       const device = devices.find(d => d.id === deviceId);
@@ -408,8 +853,28 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
         try {
           // Connect to the device
           console.log('Attempting to connect to real device...');
-          const btDevice = await RNBluetoothClassic.connectToDevice(deviceId);
+          const btDevice = await RNBluetoothClassic.connectToDevice(deviceId, {
+            // Add connection options to improve stability
+            delimiter: '\n', // Line delimiter for data
+            charset: 'utf-8', // Character set
+            connectionOptions: {
+              // Android-specific options
+              CONNECTOR_TYPE: 'rfcomm',
+              SECURE_SOCKET: true,
+              CONNECTION_PRIORITY: 1, // Request high priority connection
+            },
+          });
           console.log('Connected to device');
+
+          // On Android, request high priority connection
+          if (Platform.OS === 'android') {
+            try {
+              // This is a method that might be available on some Android devices
+              await btDevice.requestConnectionPriority?.('high');
+            } catch (error) {
+              console.log('Could not request high priority:', error);
+            }
+          }
 
           connectedDeviceRef.current = btDevice;
 
@@ -419,8 +884,12 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
           // Setup data listener
           setupDataListener(btDevice);
 
+          // Update connection state
+          connectionStateRef.current = true;
           setIsConnected(true);
+          setConnectionStatus('connected');
           setConnectedDevice(device);
+          setSignalStrength(50); // Start with medium signal strength until we get real data
 
           // Clear any previous received data
           setReceivedData('');
@@ -428,38 +897,28 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
 
           console.log(`Connected to ${device.name || device.address}`);
 
-          // Send STATUS command to get initial state
-          await sendCommand('STATUS');
+          // Start keep-alive
+          startKeepAlive();
+
+          // Start signal strength monitoring
+          startSignalStrengthMonitoring();
+
+          // Send STATUS command to get initial state after a short delay
+          setTimeout(() => {
+            sendCommand('STATUS', 'high').catch(error => {
+              console.error('Error sending initial STATUS command:', 'high');
+              console.error('Error sending initial STATUS command:', error);
+            });
+          }, 1000);
         } catch (error) {
           console.error('Error in real device connection:', error);
           setConnectionError(
             'Failed to connect: ' +
               (error instanceof Error ? error.message : String(error)),
           );
+          setLastErrorTime(new Date());
+          setConnectionStatus('disconnected');
         }
-      } else {
-        // Mock implementation for web/development
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        setIsConnected(true);
-        setConnectedDevice(device);
-        setReceivedData('');
-        setLastUpdated(new Date());
-
-        // Simulate receiving initial status data
-        setTimeout(() => {
-          const mockData = `
-Socket 1: ON, 120.5W, 0.25 kWh, ₦52.50
-Socket 2: OFF, 0.0W, 0.75 kWh, ₦157.50
-Socket 1 V:220.5V I:0.55A
-Socket 2 V:0.0V I:0.0A
-Light level: 350
-Light threshold: 500
-Light relay: OFF
-Auto mode: ON
-`;
-          setReceivedData(mockData);
-          setLastUpdated(new Date());
-        }, 500);
       }
     } catch (error) {
       console.error('Error connecting to device:', error);
@@ -468,40 +927,152 @@ Auto mode: ON
           error instanceof Error ? error.message : 'Unknown error'
         }`,
       );
+      setLastErrorTime(new Date());
+      setConnectionStatus('disconnected');
     }
   };
 
   const reconnect = async () => {
-    const deviceId = lastConnectedDeviceIdRef.current;
-    if (!deviceId) {
-      setConnectionError('No previous connection to reconnect to');
+    // Prevent multiple simultaneous reconnection attempts
+    if (reconnectingRef.current) {
+      console.log('Reconnection already in progress, skipping');
       return;
     }
 
-    try {
-      console.log('Attempting to reconnect...');
+    reconnectingRef.current = true;
 
-      if (isRealDevice && connectedDeviceRef.current) {
-        try {
-          // Check if we're already connected
-          const alreadyConnected =
-            await connectedDeviceRef.current.isConnected();
-          if (alreadyConnected) {
-            setIsConnected(true);
-            setConnectionError(null);
-            return;
-          }
-        } catch (error) {
-          // Error checking connection, proceed with reconnect attempt
-          console.error('Error checking connection before reconnect:', error);
-        }
+    const deviceId = lastConnectedDeviceIdRef.current;
+    if (!deviceId) {
+      setConnectionError('No previous connection to reconnect to');
+      setLastErrorTime(new Date());
+      reconnectingRef.current = false;
+      return;
+    }
+
+    // Check if we've exceeded the maximum number of reconnection attempts
+    if (reconnectionAttemptsRef.current >= maxReconnectionAttempts) {
+      console.log(
+        `Maximum reconnection attempts (${maxReconnectionAttempts}) reached`,
+      );
+      setConnectionError(
+        `Failed to reconnect after ${maxReconnectionAttempts} attempts. Please try manually connecting.`,
+      );
+      setLastErrorTime(new Date());
+      reconnectingRef.current = false;
+      return;
+    }
+
+    reconnectionAttemptsRef.current++;
+
+    try {
+      console.log(
+        `Attempting to reconnect... (Attempt ${reconnectionAttemptsRef.current}/${maxReconnectionAttempts})`,
+      );
+      setConnectionStatus('connecting');
+
+      // Request permissions first
+      const permissionsGranted = await requestBluetoothPermissions();
+      if (!permissionsGranted) {
+        console.log('Bluetooth permissions not granted');
+        setConnectionError(
+          'Bluetooth permissions not granted. Please grant permissions in app settings.',
+        );
+        setLastErrorTime(new Date());
+        setConnectionStatus('disconnected');
+        reconnectingRef.current = false;
+        return;
       }
 
-      // Try to reconnect
-      await connect(deviceId);
+      // Try to connect
+      try {
+        // Connect to the device
+        const device = devices.find(d => d.id === deviceId);
+        if (!device) {
+          throw new Error('Device not found');
+        }
+
+        const btDevice = await RNBluetoothClassic.connectToDevice(deviceId, {
+          // Add connection options to improve stability
+          delimiter: '\n', // Line delimiter for data
+          charset: 'utf-8', // Character set
+          connectionOptions: {
+            // Android-specific options
+            CONNECTOR_TYPE: 'rfcomm',
+            SECURE_SOCKET: true,
+            CONNECTION_PRIORITY: 1, // Request high priority connection
+          },
+        });
+
+        // On Android, request high priority connection
+        if (Platform.OS === 'android') {
+          try {
+            await btDevice.requestConnectionPriority?.('high');
+          } catch (error) {
+            console.log('Could not request high priority:', error);
+          }
+        }
+
+        connectedDeviceRef.current = btDevice;
+
+        // Setup data listener
+        setupDataListener(btDevice);
+
+        // Update connection state
+        connectionStateRef.current = true;
+        setIsConnected(true);
+        setConnectionStatus('connected');
+        setConnectedDevice(device);
+        setConnectionError(null);
+        setSignalStrength(50); // Start with medium signal strength
+
+        console.log('Reconnected successfully');
+
+        // Start keep-alive
+        startKeepAlive();
+
+        // Start signal strength monitoring
+        startSignalStrengthMonitoring();
+
+        // Send STATUS command to refresh all state information after a short delay
+        setTimeout(() => {
+          sendCommand('STATUS', 'high').catch(error => {
+            console.error('Error sending STATUS after reconnect:', error);
+          });
+        }, 1000);
+
+        // Process any buffered commands
+        if (dataBufferRef.current.length > 0) {
+          setTimeout(processBufferedCommands, 2000);
+        }
+
+        // Reset reconnection attempts on success
+        reconnectionAttemptsRef.current = 0;
+        reconnectingRef.current = false;
+
+        return; // Success, exit the function
+      } catch (error) {
+        console.error('Reconnection failed:', error);
+
+        // Schedule another reconnection attempt with exponential backoff
+        const backoffTime = Math.min(
+          5000 * Math.pow(2, reconnectionAttemptsRef.current - 1),
+          60000,
+        );
+        console.log(`Scheduling next reconnection attempt in ${backoffTime}ms`);
+
+        setConnectionStatus('disconnected');
+
+        setTimeout(() => {
+          reconnectingRef.current = false;
+          reconnect();
+        }, backoffTime);
+      }
     } catch (error) {
-      console.error('Error reconnecting:', error);
+      console.error('Error in reconnect function:', error);
       setConnectionError('Failed to reconnect');
+      setLastErrorTime(new Date());
+      setConnectionStatus('disconnected');
+      reconnectingRef.current = false;
     }
   };
 
@@ -520,122 +1091,119 @@ Auto mode: ON
             'Failed to disconnect: ' +
               (error instanceof Error ? error.message : String(error)),
           );
+          setLastErrorTime(new Date());
         }
-      } else if (!isRealDevice) {
-        // Mock implementation for web/development
-        await new Promise(resolve => setTimeout(resolve, 500));
       }
 
+      // Update connection state
+      connectionStateRef.current = false;
       setIsConnected(false);
+      setConnectionStatus('disconnected');
       setConnectedDevice(null);
       connectedDeviceRef.current = null;
+      setSignalStrength(0);
+
+      // Reset reconnection attempts when manually disconnecting
+      reconnectionAttemptsRef.current = 0;
+      reconnectingRef.current = false;
+      connectionCheckCountRef.current = 0;
+
+      // Clear keep-alive
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+      }
+
+      // Clear signal strength monitoring
+      if (rssiCheckIntervalRef.current) {
+        clearInterval(rssiCheckIntervalRef.current);
+        rssiCheckIntervalRef.current = null;
+      }
 
       console.log('Disconnected from the device');
     } catch (error) {
       console.error('Error disconnecting:', error);
       setConnectionError('Failed to disconnect');
+      setLastErrorTime(new Date());
     }
   };
 
-  const sendCommand = async (command: string) => {
+  const sendCommand = async (
+    command: string,
+    priority: 'high' | 'normal' | 'low' = 'normal',
+  ) => {
+    // Always buffer the command first
+    const bufferedCommand: BufferedCommand = {
+      command,
+      timestamp: Date.now(),
+      priority,
+      retries: 0,
+    };
+
+    // Add to buffer
+    dataBufferRef.current.push(bufferedCommand);
+
+    // Trim buffer if it gets too large (remove oldest low priority commands first)
+    if (dataBufferRef.current.length > MAX_BUFFER_SIZE) {
+      // Find low priority commands
+      const lowPriorityCommands = dataBufferRef.current.filter(
+        cmd => cmd.priority === 'low',
+      );
+
+      if (lowPriorityCommands.length > 0) {
+        // Remove the oldest low priority command
+        const oldestLowPriority = lowPriorityCommands.reduce(
+          (oldest, current) =>
+            current.timestamp < oldest.timestamp ? current : oldest,
+          lowPriorityCommands[0],
+        );
+
+        dataBufferRef.current = dataBufferRef.current.filter(
+          cmd =>
+            cmd.command !== oldestLowPriority.command ||
+            cmd.timestamp !== oldestLowPriority.timestamp,
+        );
+      } else {
+        // If no low priority commands, remove the oldest normal priority
+        const normalPriorityCommands = dataBufferRef.current.filter(
+          cmd => cmd.priority === 'normal',
+        );
+
+        if (normalPriorityCommands.length > 0) {
+          const oldestNormalPriority = normalPriorityCommands.reduce(
+            (oldest, current) =>
+              current.timestamp < oldest.timestamp ? current : oldest,
+            normalPriorityCommands[0],
+          );
+
+          dataBufferRef.current = dataBufferRef.current.filter(
+            cmd =>
+              cmd.command !== oldestNormalPriority.command ||
+              cmd.timestamp !== oldestNormalPriority.timestamp,
+          );
+        } else {
+          // If only high priority commands, remove the oldest one
+          dataBufferRef.current.sort((a, b) => a.timestamp - b.timestamp);
+          dataBufferRef.current.shift();
+        }
+      }
+    }
+
+    // Update buffered commands count
+    setBufferedCommands(dataBufferRef.current.length);
+
+    // If not connected, just keep in buffer for later
     if (!isConnected) {
-      console.log('Please connect to a device first');
+      console.log('Not connected, command buffered for later sending');
       return Promise.reject(new Error('Not connected'));
     }
 
-    try {
-      // Add newline to command if not present
-      const formattedCommand = command.endsWith('\n')
-        ? command
-        : command + '\n';
+    // Process the buffer (will send commands if connected)
+    processBufferedCommands();
 
-      if (isRealDevice && connectedDeviceRef.current) {
-        try {
-          console.log('Sending command to real device:', command);
-          await connectedDeviceRef.current.write(formattedCommand);
-          console.log('Command sent successfully');
-        } catch (error) {
-          console.error('Error sending command to real device:', error);
-          setConnectionError(
-            'Failed to send command: ' +
-              (error instanceof Error ? error.message : String(error)),
-          );
-
-          // Check if we're still connected
-          try {
-            const stillConnected =
-              await connectedDeviceRef.current.isConnected();
-            if (!stillConnected) {
-              setIsConnected(false);
-              setConnectionError('Connection lost while sending command');
-            }
-          } catch (error) {
-            console.error(
-              'Error checking connection after send failure:',
-              error,
-            );
-          }
-
-          throw error;
-        }
-      } else if (!isRealDevice) {
-        // Mock implementation for web/development
-        console.log('Sending mock command:', command);
-
-        // Simulate receiving response data based on command
-        setTimeout(() => {
-          let response = '';
-
-          if (command === 'STATUS') {
-            response = `
-Socket 1: ${Math.random() > 0.5 ? 'ON' : 'OFF'}, ${(
-              Math.random() * 200
-            ).toFixed(1)}W, ${(Math.random() * 1).toFixed(2)} kWh, ₦${(
-              Math.random() * 200
-            ).toFixed(2)}
-Socket 2: ${Math.random() > 0.5 ? 'ON' : 'OFF'}, ${(
-              Math.random() * 200
-            ).toFixed(1)}W, ${(Math.random() * 1).toFixed(2)} kWh, ₦${(
-              Math.random() * 200
-            ).toFixed(2)}
-Socket 1 V:${(220 + Math.random() * 10).toFixed(1)}V I:${(
-              Math.random() * 1
-            ).toFixed(2)}A
-Socket 2 V:${(220 + Math.random() * 10).toFixed(1)}V I:${(
-              Math.random() * 1
-            ).toFixed(2)}A
-Light level: ${Math.floor(Math.random() * 1000)}
-Light threshold: 500
-Light relay: ${Math.random() > 0.5 ? 'ON' : 'OFF'}
-Auto mode: ON
-`;
-          } else if (command.startsWith('R1')) {
-            response = `Socket 1: ${command.includes('ON') ? 'ON' : 'OFF'}`;
-          } else if (command.startsWith('R2')) {
-            response = `Socket 2: ${command.includes('ON') ? 'ON' : 'OFF'}`;
-          } else if (command.startsWith('L')) {
-            response = `Light relay: ${command.includes('ON') ? 'ON' : 'OFF'}`;
-          } else if (command.startsWith('AUTO')) {
-            response = `Auto mode: ${command.includes('ON') ? 'ON' : 'OFF'}`;
-          } else if (command.startsWith('SET THRESHOLD')) {
-            const threshold = command.split(' ')[2];
-            response = `Light threshold set to ${threshold}`;
-          } else if (command === 'ENERGY RESET') {
-            response = 'Energy counters reset';
-          }
-
-          setReceivedData(prev => prev + response + '\n');
-          setLastUpdated(new Date());
-        }, 300);
-      }
-
-      // Update last updated timestamp
-      setLastUpdated(new Date());
-      return Promise.resolve();
-    } catch (error) {
-      console.error('Error sending command:', error);
-      return Promise.reject(error);
-    }
+    // Return a promise that resolves when the command is processed
+    // This is a bit of a simplification as we don't track individual commands
+    return Promise.resolve();
   };
 
   const clearReceivedData = () => {
@@ -661,6 +1229,11 @@ Auto mode: ON
         lastUpdated,
         reconnect,
         connectionError,
+        connectionStatus,
+        lastErrorTime,
+        signalStrength,
+        bufferedCommands,
+        setKeepAliveEnabled,
       }}>
       {children}
     </BluetoothContext.Provider>
