@@ -1,719 +1,395 @@
-'use client';
-
-import {useEffect, useState} from 'react';
+import React, {useState, useEffect} from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
   TouchableOpacity,
-  Switch,
   ActivityIndicator,
+  ScrollView,
   Alert,
 } from 'react-native';
-import Slider from '@react-native-community/slider';
 import {useBluetooth} from '../context/bluetooth-context';
-import Icon from 'react-native-vector-icons/Feather';
 
-export function ControlScreen() {
-  const {isConnected, sendCommand, receivedData, connectionError} =
-    useBluetooth();
+// Define device states
+type DeviceState = 'unknown' | 'on' | 'off';
 
-  const [socket1On, setSocket1On] = useState(false);
-  const [socket2On, setSocket2On] = useState(false);
-  const [lightOn, setLightOn] = useState(false);
-  const [autoLightMode, setAutoLightMode] = useState(true);
-  const [lightThreshold, setLightThreshold] = useState(500);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+const ControlScreen = () => {
+  const {
+    isConnected,
+    connectionStatus,
+    sendCommand,
+    receivedData,
+    lastUpdated,
+    connectionError,
+  } = useBluetooth();
 
-  // Add additional state for energy monitoring
-  const [socket1Power, setSocket1Power] = useState(0);
-  const [socket2Power, setSocket2Power] = useState(0);
-  const [socket1Energy, setSocket1Energy] = useState(0);
-  const [socket2Energy, setSocket2Energy] = useState(0);
-  const [socket1Cost, setSocket1Cost] = useState(0);
-  const [socket2Cost, setSocket2Cost] = useState(0);
-  const [lightLevel, setLightLevel] = useState(0);
+  // Track device states
+  const [powerState, setPowerState] = useState<DeviceState>('unknown');
+  const [energyValue, setEnergyValue] = useState<number | null>(null);
+  const [costValue, setCostValue] = useState<number | null>(null);
+  const [initialStateFetched, setInitialStateFetched] = useState(false);
+  const [isSendingCommand, setIsSendingCommand] = useState(false);
 
-  // Parse received data to update control states
+  // Parse received data to update states
   useEffect(() => {
-    if (isConnected && receivedData) {
-      const lines = receivedData.split('\n');
+    if (!receivedData) {
+      return;
+    }
 
-      for (const line of lines) {
-        // Parse socket states with power, energy and cost
-        if (line.includes('Socket 1:')) {
-          const isOn = line.includes('ON');
-          setSocket1On(isOn);
+    // Process data line by line
+    const lines = receivedData.split('\n');
+    let updatedPowerState = false;
 
-          // Parse power
-          const powerMatch = line.match(/(\d+\.\d+)W/);
-          if (powerMatch) {
-            setSocket1Power(Number.parseFloat(powerMatch[1]));
-          }
+    lines.forEach(line => {
+      const trimmedLine = line.trim();
 
-          // Parse energy
-          const energyMatch = line.match(/(\d+\.\d+) kWh/);
-          if (energyMatch) {
-            setSocket1Energy(Number.parseFloat(energyMatch[1]));
-          }
-
-          // Parse cost
-          const costMatch = line.match(/₦(\d+\.\d+)/);
-          if (costMatch) {
-            setSocket1Cost(Number.parseFloat(costMatch[1]));
-          }
+      if (trimmedLine.startsWith('POWER:')) {
+        const powerValue = parseFloat(trimmedLine.substring(6));
+        setPowerState(powerValue > 0 ? 'on' : 'off');
+        updatedPowerState = true;
+      } else if (trimmedLine.startsWith('ENERGY:')) {
+        const value = parseFloat(trimmedLine.substring(7));
+        if (!isNaN(value)) {
+          setEnergyValue(value);
         }
-
-        if (line.includes('Socket 2:')) {
-          const isOn = line.includes('ON');
-          setSocket2On(isOn);
-
-          // Parse power
-          const powerMatch = line.match(/(\d+\.\d+)W/);
-          if (powerMatch) {
-            setSocket2Power(Number.parseFloat(powerMatch[1]));
-          }
-
-          // Parse energy
-          const energyMatch = line.match(/(\d+\.\d+) kWh/);
-          if (energyMatch) {
-            setSocket2Energy(Number.parseFloat(energyMatch[1]));
-          }
-
-          // Parse cost
-          const costMatch = line.match(/₦(\d+\.\d+)/);
-          if (costMatch) {
-            setSocket2Cost(Number.parseFloat(costMatch[1]));
-          }
-        }
-
-        // Parse light states
-        if (line.includes('Light relay:')) {
-          const isOn = line.includes('ON');
-          setLightOn(isOn);
-        }
-
-        if (line.includes('Light threshold:')) {
-          const thresholdMatch = line.match(/Light threshold: (\d+)/);
-          if (thresholdMatch) {
-            setLightThreshold(Number.parseInt(thresholdMatch[1]));
-          }
-        }
-
-        // Parse light level
-        if (line.includes('Light level:')) {
-          const levelMatch = line.match(/Light level: (\d+)/);
-          if (levelMatch) {
-            setLightLevel(Number.parseInt(levelMatch[1]));
-          }
-        }
-
-        // Parse auto mode
-        if (line.includes('Auto mode:')) {
-          const isAuto = line.includes('ON');
-          setAutoLightMode(isAuto);
+      } else if (trimmedLine.startsWith('COST:')) {
+        const value = parseFloat(trimmedLine.substring(5));
+        if (!isNaN(value)) {
+          setCostValue(value);
         }
       }
+    });
 
-      // Clear refreshing state
-      setIsRefreshing(false);
+    // If we received any data and haven't fetched initial state yet
+    if (lines.length > 0 && !initialStateFetched) {
+      setInitialStateFetched(updatedPowerState); // Only mark as fetched if we got power state
     }
-  }, [isConnected, receivedData]);
+  }, [receivedData]);
 
-  // Show connection error alerts
+  // Request initial state when connected
   useEffect(() => {
-    if (connectionError) {
-      Alert.alert('Connection Error', connectionError);
-    }
-  }, [connectionError]);
+    if (isConnected && !initialStateFetched) {
+      // Reset states when connecting
+      setPowerState('unknown');
+      setEnergyValue(null);
+      setCostValue(null);
 
-  // Request initial status when connected
-  useEffect(() => {
-    if (isConnected) {
-      handleRefresh();
+      // Request current status from device
+      console.log('Requesting initial device state...');
+      setIsSendingCommand(true);
+      sendCommand('STATUS', 'high')
+        .then(() => {
+          console.log('Initial state request sent');
+        })
+        .catch(error => {
+          console.error('Failed to request initial state:', error);
+          Alert.alert('Error', 'Failed to request device state');
+        })
+        .finally(() => {
+          setIsSendingCommand(false);
+        });
     }
-  }, [isConnected]);
 
-  const handleRefresh = () => {
-    if (isConnected) {
-      setIsRefreshing(true);
-      sendCommand('STATUS').catch(error => {
-        console.error('Error sending refresh command:', error);
-        setIsRefreshing(false);
-      });
-    }
-  };
-
-  const toggleSocket = (socket: number, state: boolean) => {
+    // Reset states when disconnected
     if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to your device first');
+      setPowerState('unknown');
+      setEnergyValue(null);
+      setCostValue(null);
+      setInitialStateFetched(false);
+    }
+  }, [isConnected, initialStateFetched]);
+
+  // Toggle power state
+  const togglePower = async () => {
+    if (!isConnected || powerState === 'unknown' || isSendingCommand) {
       return;
     }
 
-    const command = `R${socket} ${state ? 'ON' : 'OFF'}`;
-    sendCommand(command)
-      .then(() => {
-        if (socket === 1) {
-          setSocket1On(state);
-        } else {
-          setSocket2On(state);
-        }
+    const newState = powerState === 'on' ? 'off' : 'on';
+    const command = `POWER:${newState === 'on' ? '1' : '0'}`;
 
-        console.log(`Socket ${socket} has been turned ${state ? 'on' : 'off'}`);
+    try {
+      setIsSendingCommand(true);
+      console.log(`Toggling power to ${newState}`);
 
-        // Request status update to confirm changes
-        setTimeout(() => {
-          sendCommand('STATUS').catch(error => {
-            console.error('Error sending status command after toggle:', error);
-          });
-        }, 500);
-      })
-      .catch(error => {
-        Alert.alert(
-          'Command Failed',
-          `Failed to turn socket ${socket} ${state ? 'on' : 'off'}`,
-        );
-      });
+      // Optimistically update UI
+      setPowerState('unknown'); // Show loading state
+
+      await sendCommand(command, 'high');
+      console.log('Power toggle command sent');
+
+      // Request status update to confirm change
+      setTimeout(() => {
+        sendCommand('STATUS', 'high').catch(error => {
+          console.error('Failed to request status after toggle:', error);
+        });
+      }, 500);
+    } catch (error) {
+      console.error('Failed to toggle power:', error);
+      Alert.alert('Error', 'Failed to toggle power');
+
+      // Revert to previous state on error
+      setPowerState(powerState);
+    } finally {
+      setIsSendingCommand(false);
+    }
   };
 
-  const toggleLight = (state: boolean) => {
-    if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to your device first');
+  // Send test echo command
+  const sendEchoTest = async () => {
+    if (!isConnected || isSendingCommand) {
       return;
     }
 
-    const command = `L ${state ? 'ON' : 'OFF'}`;
-    sendCommand(command)
-      .then(() => {
-        setLightOn(state);
-        console.log(`Light has been turned ${state ? 'on' : 'off'}`);
-
-        // Request status update to confirm changes
-        setTimeout(() => {
-          sendCommand('STATUS').catch(error => {
-            console.error('Error sending status command after toggle:', error);
-          });
-        }, 500);
-      })
-      .catch(error => {
-        Alert.alert(
-          'Command Failed',
-          `Failed to turn light ${state ? 'on' : 'off'}`,
-        );
-      });
+    try {
+      setIsSendingCommand(true);
+      console.log('Sending echo test command');
+      await sendCommand('ECHO:TEST', 'high');
+      console.log('Echo test command sent');
+    } catch (error) {
+      console.error('Failed to send echo test:', error);
+      Alert.alert('Error', 'Failed to send echo test');
+    } finally {
+      setIsSendingCommand(false);
+    }
   };
 
-  const toggleAutoLight = (state: boolean) => {
-    if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to your device first');
+  // Request status update
+  const requestStatus = async () => {
+    if (!isConnected || isSendingCommand) {
       return;
     }
 
-    const command = `AUTO ${state ? 'ON' : 'OFF'}`;
-    sendCommand(command)
-      .then(() => {
-        setAutoLightMode(state);
-        console.log(`Auto light mode has been turned ${state ? 'on' : 'off'}`);
-
-        // Request status update to confirm changes
-        setTimeout(() => {
-          sendCommand('STATUS').catch(error => {
-            console.error('Error sending status command after toggle:', error);
-          });
-        }, 500);
-      })
-      .catch(error => {
-        Alert.alert(
-          'Command Failed',
-          `Failed to set auto light mode to ${state ? 'on' : 'off'}`,
-        );
-      });
+    try {
+      setIsSendingCommand(true);
+      console.log('Requesting status update');
+      await sendCommand('STATUS', 'high');
+      console.log('Status request sent');
+    } catch (error) {
+      console.error('Failed to request status:', error);
+      Alert.alert('Error', 'Failed to request status');
+    } finally {
+      setIsSendingCommand(false);
+    }
   };
 
-  const updateLightThreshold = (value: number) => {
-    if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to your device first');
-      return;
+  // Render power button with appropriate state
+  const renderPowerButton = () => {
+    // Determine button style based on state
+    let buttonStyle = [styles.powerButton, styles.powerButtonUnknown];
+    let textStyle = styles.powerButtonText;
+    let buttonText = 'Unknown';
+    let disabled = !isConnected || powerState === 'unknown' || isSendingCommand;
+
+    if (powerState === 'on') {
+      buttonStyle = [styles.powerButton, styles.powerButtonOn];
+      buttonText = 'ON';
+      disabled = !isConnected || isSendingCommand;
+    } else if (powerState === 'off') {
+      buttonStyle = [styles.powerButton, styles.powerButtonOff];
+      buttonText = 'OFF';
+      disabled = !isConnected || isSendingCommand;
     }
 
-    const command = `SET THRESHOLD ${value}`;
-    sendCommand(command)
-      .then(() => {
-        setLightThreshold(value);
-        console.log(`Light threshold set to ${value}`);
-
-        // Request status update to confirm changes
-        setTimeout(() => {
-          sendCommand('STATUS').catch(error => {
-            console.error('Error sending status command after update:', error);
-          });
-        }, 500);
-      })
-      .catch(error => {
-        Alert.alert('Command Failed', 'Failed to update light threshold');
-      });
-  };
-
-  const resetEnergy = () => {
-    if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to your device first');
-      return;
-    }
-
-    Alert.alert(
-      'Reset Energy Counters',
-      'Are you sure you want to reset all energy counters?',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Reset',
-          style: 'destructive',
-          onPress: () => {
-            sendCommand('ENERGY RESET')
-              .then(() => {
-                console.log('Energy counters reset');
-                // Request status update to confirm changes
-                setTimeout(() => {
-                  sendCommand('STATUS').catch(error => {
-                    console.error(
-                      'Error sending status command after reset:',
-                      error,
-                    );
-                  });
-                }, 500);
-              })
-              .catch(error => {
-                Alert.alert(
-                  'Command Failed',
-                  'Failed to reset energy counters',
-                );
-              });
-          },
-        },
-      ],
+    return (
+      <TouchableOpacity
+        style={[...buttonStyle, disabled ? styles.buttonDisabled : null]}
+        onPress={togglePower}
+        disabled={disabled}>
+        {powerState === 'unknown' && isConnected ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <Text style={textStyle}>{buttonText}</Text>
+        )}
+      </TouchableOpacity>
     );
   };
 
   return (
     <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Control Panel</Text>
-        <TouchableOpacity
-          style={styles.refreshButton}
-          onPress={handleRefresh}
-          disabled={!isConnected || isRefreshing}>
-          {isRefreshing ? (
-            <ActivityIndicator size="small" color="#0070f3" />
-          ) : (
-            <Icon name="refresh-cw" size={18} color="#0070f3" />
-          )}
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.connectionStatus}>
-        <Text
-          style={[
-            styles.statusText,
-            isConnected ? styles.connected : styles.disconnected,
-          ]}>
-          {isConnected ? 'Connected' : 'Disconnected'}
+      <View style={styles.statusContainer}>
+        <Text style={styles.statusText}>
+          Status:{' '}
+          {connectionStatus.charAt(0).toUpperCase() + connectionStatus.slice(1)}
         </Text>
+        {connectionError && (
+          <Text style={styles.errorText}>{connectionError}</Text>
+        )}
+        {lastUpdated && (
+          <Text style={styles.lastUpdatedText}>
+            Last updated: {lastUpdated.toLocaleTimeString()}
+          </Text>
+        )}
       </View>
 
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={styles.cardTitleContainer}>
-            <Icon name="power" size={16} color="#0070f3" />
-            <Text style={styles.cardTitle}>Socket Control</Text>
-          </View>
-        </View>
+      <View style={styles.controlsContainer}>
+        <Text style={styles.sectionTitle}>Power Control</Text>
+        {renderPowerButton()}
 
-        <View style={styles.controlRow}>
-          <View style={styles.controlLabel}>
-            <Icon name="zap" size={16} color="#666" />
-            <Text style={styles.controlText}>Socket 1</Text>
-          </View>
-          <View style={styles.controlActions}>
-            <View
-              style={[
-                styles.statusBadge,
-                socket1On ? styles.statusOn : styles.statusOff,
-              ]}>
-              <Text style={styles.statusText}>{socket1On ? 'ON' : 'OFF'}</Text>
-            </View>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                socket1On ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleSocket(1, true)}
-              disabled={socket1On || !isConnected}>
-              <Text style={styles.buttonText}>On</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                !socket1On ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleSocket(1, false)}
-              disabled={!socket1On || !isConnected}>
-              <Text style={styles.buttonText}>Off</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Add power and energy info for Socket 1 */}
-        <View style={styles.energyInfo}>
-          <Text style={styles.energyText}>
-            Power: {socket1Power.toFixed(1)}W
+        <View style={styles.dataContainer}>
+          <Text style={styles.dataLabel}>Energy:</Text>
+          <Text style={styles.dataValue}>
+            {energyValue !== null ? `${energyValue.toFixed(2)} kWh` : 'Unknown'}
           </Text>
-          <Text style={styles.energyText}>
-            Energy: {socket1Energy.toFixed(3)} kWh
-          </Text>
-          <Text style={styles.energyText}>Cost: ₦{socket1Cost.toFixed(2)}</Text>
         </View>
 
-        <View style={styles.controlRow}>
-          <View style={styles.controlLabel}>
-            <Icon name="zap" size={16} color="#666" />
-            <Text style={styles.controlText}>Socket 2</Text>
-          </View>
-          <View style={styles.controlActions}>
-            <View
-              style={[
-                styles.statusBadge,
-                socket2On ? styles.statusOn : styles.statusOff,
-              ]}>
-              <Text style={styles.statusText}>{socket2On ? 'ON' : 'OFF'}</Text>
-            </View>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                socket2On ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleSocket(2, true)}
-              disabled={socket2On || !isConnected}>
-              <Text style={styles.buttonText}>On</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                !socket2On ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleSocket(2, false)}
-              disabled={!socket2On || !isConnected}>
-              <Text style={styles.buttonText}>Off</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Add power and energy info for Socket 2 */}
-        <View style={styles.energyInfo}>
-          <Text style={styles.energyText}>
-            Power: {socket2Power.toFixed(1)}W
+        <View style={styles.dataContainer}>
+          <Text style={styles.dataLabel}>Cost:</Text>
+          <Text style={styles.dataValue}>
+            {costValue !== null ? `$${costValue.toFixed(2)}` : 'Unknown'}
           </Text>
-          <Text style={styles.energyText}>
-            Energy: {socket2Energy.toFixed(3)} kWh
-          </Text>
-          <Text style={styles.energyText}>Cost: ₦{socket2Cost.toFixed(2)}</Text>
         </View>
+      </View>
 
-        {/* Add reset energy button */}
+      <View style={styles.buttonContainer}>
         <TouchableOpacity
-          style={styles.resetButton}
-          onPress={resetEnergy}
-          disabled={!isConnected}>
-          <Text style={styles.resetButtonText}>Reset Energy Counters</Text>
+          style={[
+            styles.button,
+            !isConnected || isSendingCommand ? styles.buttonDisabled : null,
+          ]}
+          onPress={requestStatus}
+          disabled={!isConnected || isSendingCommand}>
+          <Text style={styles.buttonText}>Refresh Status</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.button,
+            !isConnected || isSendingCommand ? styles.buttonDisabled : null,
+          ]}
+          onPress={sendEchoTest}
+          disabled={!isConnected || isSendingCommand}>
+          <Text style={styles.buttonText}>Test Echo</Text>
         </TouchableOpacity>
       </View>
 
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={styles.cardTitleContainer}>
-            <Icon name="sun" size={16} color="#0070f3" />
-            <Text style={styles.cardTitle}>Light Control</Text>
-          </View>
-        </View>
-
-        <View style={styles.controlRow}>
-          <View style={styles.controlLabel}>
-            <Icon name="sun" size={16} color="#666" />
-            <Text style={styles.controlText}>Light</Text>
-          </View>
-          <View style={styles.controlActions}>
-            <View
-              style={[
-                styles.statusBadge,
-                lightOn ? styles.statusOn : styles.statusOff,
-              ]}>
-              <Text style={styles.statusText}>{lightOn ? 'ON' : 'OFF'}</Text>
-            </View>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                lightOn ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleLight(true)}
-              disabled={lightOn || autoLightMode || !isConnected}>
-              <Text style={styles.buttonText}>On</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                !lightOn ? styles.activeButton : styles.inactiveButton,
-              ]}
-              onPress={() => toggleLight(false)}
-              disabled={!lightOn || autoLightMode || !isConnected}>
-              <Text style={styles.buttonText}>Off</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <View style={styles.controlRow}>
-          <View style={styles.controlLabel}>
-            <Text style={styles.controlText}>Auto Light Mode</Text>
-          </View>
-          <View style={styles.controlActions}>
-            <View
-              style={[
-                styles.statusBadge,
-                autoLightMode ? styles.statusOn : styles.statusOff,
-              ]}>
-              <Text style={styles.statusText}>
-                {autoLightMode ? 'ON' : 'OFF'}
-              </Text>
-            </View>
-            <Switch
-              value={autoLightMode}
-              onValueChange={toggleAutoLight}
-              disabled={!isConnected}
-              trackColor={{false: '#d1d5db', true: '#bfdbfe'}}
-              thumbColor={autoLightMode ? '#0070f3' : '#9ca3af'}
-            />
-          </View>
-        </View>
-
-        {/* Add current light level indicator */}
-        <View style={styles.lightLevelContainer}>
-          <Text style={styles.lightLevelText}>
-            Current Light Level: {lightLevel}
-          </Text>
-          <View style={styles.lightLevelBar}>
-            <View
-              style={[
-                styles.lightLevelFill,
-                {width: `${Math.min(100, (lightLevel / 4000) * 100)}%`},
-              ]}
-            />
-          </View>
-        </View>
-
-        <View style={styles.sliderContainer}>
-          <View style={styles.sliderHeader}>
-            <Text style={styles.sliderLabel}>
-              Light Threshold: {lightThreshold}
-            </Text>
-          </View>
-          <Slider
-            style={styles.slider}
-            minimumValue={0}
-            maximumValue={4000}
-            step={50}
-            value={lightThreshold}
-            onValueChange={setLightThreshold}
-            onSlidingComplete={updateLightThreshold}
-            disabled={!autoLightMode || !isConnected}
-            minimumTrackTintColor="#0070f3"
-            maximumTrackTintColor="#d1d5db"
-            thumbTintColor="#0070f3"
-          />
-          <View style={styles.sliderLabels}>
-            <Text style={styles.sliderMinMax}>Dark</Text>
-            <Text style={styles.sliderMinMax}>Light</Text>
-          </View>
-        </View>
+      <View style={styles.debugContainer}>
+        <Text style={styles.debugTitle}>Debug Information</Text>
+        <Text style={styles.debugText}>
+          Connected: {isConnected ? 'Yes' : 'No'}
+          {'\n'}
+          Initial State Fetched: {initialStateFetched ? 'Yes' : 'No'}
+          {'\n'}
+          Power State: {powerState}
+          {'\n'}
+          Sending Command: {isSendingCommand ? 'Yes' : 'No'}
+        </Text>
       </View>
     </ScrollView>
   );
-}
+};
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
     padding: 16,
+    backgroundColor: '#f5f5f5',
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  refreshButton: {
-    padding: 8,
-    borderRadius: 20,
-    backgroundColor: '#f0f0f0',
-  },
-  connectionStatus: {
-    marginBottom: 16,
-    alignItems: 'center',
+  statusContainer: {
+    marginBottom: 20,
+    padding: 10,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    elevation: 2,
   },
   statusText: {
+    fontSize: 16,
     fontWeight: 'bold',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
   },
-  connected: {
-    backgroundColor: '#10b981',
-    color: 'white',
+  errorText: {
+    color: 'red',
+    marginTop: 5,
   },
-  disconnected: {
-    backgroundColor: '#ef4444',
-    color: 'white',
+  lastUpdatedText: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 5,
   },
-  card: {
-    backgroundColor: 'white',
+  controlsContainer: {
+    backgroundColor: '#fff',
     borderRadius: 8,
     padding: 16,
     marginBottom: 16,
     elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: {width: 0, height: 1},
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
   },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
     marginBottom: 16,
   },
-  cardTitleContainer: {
-    flexDirection: 'row',
+  powerButton: {
+    padding: 20,
+    borderRadius: 50,
     alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+    width: 100,
+    height: 100,
+    alignSelf: 'center',
   },
-  cardTitle: {
+  powerButtonOn: {
+    backgroundColor: '#4CAF50',
+  },
+  powerButtonOff: {
+    backgroundColor: '#F44336',
+  },
+  powerButtonUnknown: {
+    backgroundColor: '#9E9E9E',
+  },
+  powerButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  dataContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  dataLabel: {
     fontSize: 16,
     fontWeight: 'bold',
-    marginLeft: 8,
   },
-  controlRow: {
+  dataValue: {
+    fontSize: 16,
+  },
+  buttonContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  controlLabel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  controlText: {
-    marginLeft: 8,
-  },
-  controlActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginRight: 8,
-  },
-  statusOn: {
-    backgroundColor: '#10b981',
-  },
-  statusOff: {
-    backgroundColor: '#9ca3af',
-  },
-  statusText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: 'bold',
+    marginBottom: 20,
   },
   button: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 4,
-    marginHorizontal: 4,
-  },
-  activeButton: {
-    backgroundColor: '#0070f3',
-  },
-  inactiveButton: {
-    backgroundColor: '#f0f0f0',
+    backgroundColor: '#2196F3',
+    padding: 12,
+    borderRadius: 8,
+    flex: 1,
+    marginHorizontal: 5,
+    alignItems: 'center',
   },
   buttonText: {
     color: 'white',
-    fontWeight: '500',
+    fontWeight: 'bold',
   },
-  sliderContainer: {
-    marginTop: 8,
+  buttonDisabled: {
+    opacity: 0.5,
   },
-  sliderHeader: {
-    marginBottom: 8,
-  },
-  sliderLabel: {
-    fontWeight: '500',
-  },
-  slider: {
-    width: '100%',
-    height: 40,
-  },
-  sliderLabels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  sliderMinMax: {
-    fontSize: 12,
-    color: '#666',
-  },
-  energyInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    backgroundColor: '#f9fafb',
-    padding: 8,
-    borderRadius: 4,
-    marginBottom: 16,
-  },
-  energyText: {
-    fontSize: 12,
-    color: '#4b5563',
-  },
-  resetButton: {
-    backgroundColor: '#ef4444',
+  debugContainer: {
+    backgroundColor: '#f0f0f0',
     padding: 10,
-    borderRadius: 4,
-    alignItems: 'center',
-    marginTop: 8,
+    borderRadius: 8,
+    marginTop: 20,
   },
-  resetButtonText: {
-    color: 'white',
-    fontWeight: '500',
+  debugTitle: {
+    fontWeight: 'bold',
+    marginBottom: 5,
   },
-  lightLevelContainer: {
-    marginBottom: 16,
-  },
-  lightLevelText: {
-    marginBottom: 4,
-  },
-  lightLevelBar: {
-    height: 10,
-    backgroundColor: '#e5e7eb',
-    borderRadius: 5,
-    overflow: 'hidden',
-  },
-  lightLevelFill: {
-    height: '100%',
-    backgroundColor: '#0070f3',
+  debugText: {
+    fontFamily: 'monospace',
+    fontSize: 12,
   },
 });
+
+export default ControlScreen;

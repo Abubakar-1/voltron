@@ -517,7 +517,7 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     };
   }, [isConnected]);
 
-  // Setup data listener
+  // Modify the setupDataListener function to add detailed logging
   const setupDataListener = (device: BluetoothDevice) => {
     // Remove any existing subscription
     if (dataSubscriptionRef.current) {
@@ -527,11 +527,48 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     // Set up new data listener
     dataSubscriptionRef.current = device.onDataReceived(data => {
       // Receiving data is a good indicator of an active connection
-      connectionCheckCountRef.current = stableConnectionThreshold; // Consider connection stable immediately when receiving data
+      connectionCheckCountRef.current = stableConnectionThreshold;
 
       // Update signal strength on data receipt for more responsive UI
       setSignalStrength(prev => Math.min(100, prev + 5));
 
+      // Log received data in detail
+      console.log('📥 RECEIVED DATA:', {
+        rawData: data.data,
+        hexData: Array.from(data.data)
+          .map(c => c.charCodeAt(0).toString(16).padStart(2, '0'))
+          .join(' '),
+        timestamp: new Date().toISOString(),
+      });
+
+      // Parse commands if they contain newlines
+      if (data.data.includes('\n')) {
+        const lines = data.data.split('\n');
+        lines.forEach(line => {
+          if (line.trim()) {
+            console.log('📌 PARSED COMMAND:', line.trim());
+
+            // Process specific commands
+            if (line.startsWith('POWER:')) {
+              const powerValue = parseFloat(line.substring(6));
+              console.log(
+                '💡 POWER STATE:',
+                powerValue > 0 ? 'ON' : 'OFF',
+                powerValue,
+              );
+              // You could dispatch an event or update state here
+            } else if (line.startsWith('ENERGY:')) {
+              const energyValue = parseFloat(line.substring(7));
+              console.log('⚡ ENERGY VALUE:', energyValue);
+            } else if (line.startsWith('COST:')) {
+              const costValue = parseFloat(line.substring(5));
+              console.log('💰 COST VALUE:', costValue);
+            }
+          }
+        });
+      }
+
+      // Update the received data state
       setReceivedData(prev => prev + data.data);
       setLastUpdated(new Date());
 
@@ -1132,6 +1169,14 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     command: string,
     priority: 'high' | 'normal' | 'low' = 'normal',
   ) => {
+    // Log the outgoing command with details
+    console.log('📤 SENDING COMMAND:', {
+      command,
+      priority,
+      timestamp: new Date().toISOString(),
+      connectionState: isConnected ? 'connected' : 'disconnected',
+    });
+
     // Always buffer the command first
     const bufferedCommand: BufferedCommand = {
       command,
