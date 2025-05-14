@@ -110,6 +110,11 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
   const [bufferedCommands, setBufferedCommands] = useState<number>(0);
   const [keepAliveEnabled, setKeepAliveEnabled] = useState<boolean>(true);
 
+  // Add connection quality monitoring and handling
+  const connectionQualityRef = useRef<'good' | 'fair' | 'poor'>('good');
+  const lastLightCommandTimeRef = useRef<number>(0);
+  const lightCommandTimeoutsRef = useRef<number>(0);
+
   // Track reconnection attempts to prevent infinite loops
   const reconnectionAttemptsRef = useRef(0);
   const maxReconnectionAttempts = 5;
@@ -226,8 +231,8 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
 
     keepAliveIntervalRef.current = setInterval(() => {
       if (isConnected && connectedDeviceRef.current) {
-        // Send a small keep-alive packet that won't interfere with normal operation
-        sendCommand('PING', 'low').catch(err => {
+        // Send STATUS instead of PING for keep-alive
+        sendCommand('STATUS', 'low').catch(err => {
           console.log('Keep-alive failed:', err);
         });
       }
@@ -291,6 +296,59 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
         rssiCheckIntervalRef.current = null;
       }
     };
+  };
+
+  // Add this function after the startSignalStrengthMonitoring function
+  const checkBtConnectionQuality = () => {
+    // Check how long since last light command and if we've had timeouts
+    const timeSinceLastLight = Date.now() - lastLightCommandTimeRef.current;
+    const timeoutCount = lightCommandTimeoutsRef.current;
+
+    // Determine connection quality
+    if (timeoutCount > 3 || signalStrength < 30) {
+      connectionQualityRef.current = 'poor';
+    } else if (timeoutCount > 1 || signalStrength < 50) {
+      connectionQualityRef.current = 'fair';
+    } else {
+      connectionQualityRef.current = 'good';
+    }
+
+    console.log(
+      `Bluetooth connection quality: ${connectionQualityRef.current} (Signal: ${signalStrength}, Timeouts: ${timeoutCount})`,
+    );
+
+    // For poor connections, try to improve the connection
+    if (connectionQualityRef.current === 'poor' && isConnected) {
+      console.log('Poor connection detected, attempting to improve...');
+
+      // If we have an active connection, try to refresh it
+      if (connectedDeviceRef.current) {
+        // For Android, request high priority connection again
+        if (Platform.OS === 'android') {
+          try {
+            connectedDeviceRef.current
+              .requestConnectionPriority?.('high')
+              .then(() =>
+                console.log('Successfully requested high priority connection'),
+              )
+              .catch(err =>
+                console.log('Failed to request high priority:', err),
+              );
+          } catch (error) {
+            console.log('Could not request high priority:', error);
+          }
+        }
+      }
+    }
+
+    // Reset timeout counter periodically
+    if (timeSinceLastLight > 300000) {
+      // 5 minutes
+      lightCommandTimeoutsRef.current = Math.max(
+        0,
+        lightCommandTimeoutsRef.current - 1,
+      );
+    }
   };
 
   // Handle disconnection with proper error message
@@ -415,7 +473,7 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     };
   }, [isConnected]);
 
-  // Modify the setupDataListener function to handle the actual data format
+  // Update the setupDataListener function to improve command confirmation handling
   const setupDataListener = (device: BluetoothDevice) => {
     // Remove any existing subscription
     if (dataSubscriptionRef.current) {
@@ -446,6 +504,26 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
           const trimmedLine = line.trim();
           if (trimmedLine) {
             console.log('📌 PARSED LINE:', trimmedLine);
+
+            // Check for command acknowledgements
+            if (trimmedLine.startsWith('CMD_ACK:')) {
+              console.log('📬 COMMAND ACKNOWLEDGED:', trimmedLine.substring(8));
+
+              // If this is a light command acknowledgement, send a status request
+              if (
+                trimmedLine.includes('L ON') ||
+                trimmedLine.includes('L OFF')
+              ) {
+                setTimeout(() => {
+                  sendCommand('STATUS', 'high').catch(err => {
+                    console.error(
+                      'Failed to send STATUS after light command:',
+                      err,
+                    );
+                  });
+                }, 100);
+              }
+            }
 
             // Process specific data lines
             if (trimmedLine.startsWith('Light relay:')) {
@@ -1113,6 +1191,28 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     // Update buffered commands count
     setBufferedCommands(dataBufferRef.current.length);
 
+    // Add this to the sendCommand function, right after the command buffering
+    // Specially track light commands
+    if (/^L\s+(ON|OFF)$/i.test(command.trim())) {
+      lastLightCommandTimeRef.current = Date.now();
+
+      // Set a timeout to detect if the command doesn't complete
+      setTimeout(() => {
+        // Check if light state still says "unknown"
+        const isStillWaiting = dataBufferRef.current.some(
+          cmd =>
+            cmd.command === command &&
+            cmd.timestamp === bufferedCommand.timestamp,
+        );
+
+        if (isStillWaiting) {
+          console.log('Light command timeout detected');
+          lightCommandTimeoutsRef.current++;
+          checkBtConnectionQuality();
+        }
+      }, 10000); // 10 second timeout for light commands
+    }
+
     // If not connected, just keep in buffer for later
     if (!isConnected) {
       console.log('Not connected, command buffered for later sending');
@@ -1126,7 +1226,7 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     return Promise.resolve();
   };
 
-  // Update the processBufferedCommands function to ensure proper line endings
+  // Modify the processBufferedCommands function to handle light commands with special priority
   const processBufferedCommands = async () => {
     if (
       dataBufferRef.current.length === 0 ||
@@ -1136,8 +1236,31 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
       return;
     }
 
-    // Sort by priority (high first) and then by timestamp (oldest first)
+    // Sort by priority with special handling for light commands
     const sortedBuffer = [...dataBufferRef.current].sort((a, b) => {
+      // First check if either command is a light control command (top priority)
+      const aIsLight = /^L\s+(ON|OFF)$/i.test(a.command.trim());
+      const bIsLight = /^L\s+(ON|OFF)$/i.test(b.command.trim());
+
+      if (aIsLight && !bIsLight) {
+        return -1;
+      }
+      if (!aIsLight && bIsLight) {
+        return 1;
+      }
+
+      // Next check if either is a socket toggle command
+      const aIsToggle = /^(R1|R2)\s+(ON|OFF)$/i.test(a.command.trim());
+      const bIsToggle = /^(R1|R2)\s+(ON|OFF)$/i.test(b.command.trim());
+
+      if (aIsToggle && !bIsToggle) {
+        return -1;
+      }
+      if (!aIsToggle && bIsToggle) {
+        return 1;
+      }
+
+      // Then check priority
       if (a.priority !== b.priority) {
         return a.priority === 'high'
           ? -1
@@ -1147,6 +1270,8 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
           ? -1
           : 1;
       }
+
+      // Finally sort by timestamp
       return a.timestamp - b.timestamp;
     });
 
@@ -1156,11 +1281,27 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     // Check if we need to wait before sending (flow control)
     const now = Date.now();
     const timeSinceLastTransmission = now - lastTransmissionTimeRef.current;
-    if (timeSinceLastTransmission < minTransmissionIntervalMs) {
+
+    // Light commands get immediate processing
+    const isLightCommand = /^L\s+(ON|OFF)$/i.test(nextCommand.command.trim());
+    const isToggleCommand = /^(R1|R2)\s+(ON|OFF)$/i.test(
+      nextCommand.command.trim(),
+    );
+
+    // Determine transmission delay based on command type
+    const currentMinInterval = isLightCommand
+      ? 0
+      : // No delay for light commands
+      isToggleCommand
+      ? 10
+      : // Very short delay for socket commands
+        minTransmissionIntervalMs; // Normal delay for other commands
+
+    if (timeSinceLastTransmission < currentMinInterval) {
       // Schedule retry after the minimum interval
       setTimeout(
         processBufferedCommands,
-        minTransmissionIntervalMs - timeSinceLastTransmission,
+        currentMinInterval - timeSinceLastTransmission,
       );
       return;
     }
@@ -1183,18 +1324,32 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
           JSON.stringify(nextCommand.command),
         );
 
-        // The ESP32 code expects commands to end with a newline
-        // Make sure to add a newline if not present
-        const formattedCommand = nextCommand.command.endsWith('\n')
-          ? nextCommand.command
-          : nextCommand.command + '\n';
+        // For light commands, send multiple times to ensure delivery
+        if (isLightCommand) {
+          console.log(
+            'SENDING CRITICAL LIGHT COMMAND - DUPLICATE TRANSMISSION FOR RELIABILITY',
+          );
 
-        console.log(
-          'FORMATTED COMMAND WITH NEWLINE:',
-          JSON.stringify(formattedCommand),
-        );
+          // The ESP32 code expects commands to end with a newline
+          // Make sure to add a newline if not present
+          const formattedCommand = nextCommand.command.endsWith('\n')
+            ? nextCommand.command
+            : nextCommand.command + '\n';
 
-        await connectedDeviceRef.current.write(formattedCommand);
+          // Send light commands 3 times with small pauses to ensure at least one gets through
+          await connectedDeviceRef.current.write(formattedCommand);
+          await new Promise(resolve => setTimeout(resolve, 50)); // 50ms gap
+          await connectedDeviceRef.current.write(formattedCommand);
+          await new Promise(resolve => setTimeout(resolve, 50)); // 50ms gap
+          await connectedDeviceRef.current.write(formattedCommand);
+        } else {
+          // For non-light commands, send once as normal
+          const formattedCommand = nextCommand.command.endsWith('\n')
+            ? nextCommand.command
+            : nextCommand.command + '\n';
+          await connectedDeviceRef.current.write(formattedCommand);
+        }
+
         lastTransmissionTimeRef.current = Date.now();
 
         // Successful command indicates good connection
@@ -1206,10 +1361,15 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     } catch (error) {
       console.error('Error sending buffered command:', error);
 
+      // Light commands get more retry attempts
+      const maxRetries = isLightCommand ? MAX_RETRIES * 2 : MAX_RETRIES;
+
       // If it's a high priority command or hasn't been retried too many times, add it back to the buffer
       if (
-        nextCommand.retries < MAX_RETRIES &&
-        (nextCommand.priority === 'high' || nextCommand.priority === 'normal')
+        nextCommand.retries < maxRetries &&
+        (isLightCommand ||
+          nextCommand.priority === 'high' ||
+          nextCommand.priority === 'normal')
       ) {
         dataBufferRef.current.push({
           ...nextCommand,
@@ -1234,8 +1394,13 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
 
       // Process next command if there are more in the buffer
       if (dataBufferRef.current.length > 0) {
-        // Add a small delay for flow control
-        setTimeout(processBufferedCommands, minTransmissionIntervalMs);
+        // Add a smaller delay for important commands to make them more responsive
+        const nextDelay = isLightCommand
+          ? 0
+          : isToggleCommand
+          ? 10
+          : minTransmissionIntervalMs;
+        setTimeout(processBufferedCommands, nextDelay);
       }
     }
   };

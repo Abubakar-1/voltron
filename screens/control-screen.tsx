@@ -311,7 +311,6 @@ const ControlScreen = () => {
     }
 
     const newState = systemData.lightRelay === 'on' ? 'OFF' : 'ON';
-    // Make sure there's exactly one space and the command is properly formatted
     const command = `L ${newState}`;
 
     try {
@@ -319,25 +318,33 @@ const ControlScreen = () => {
       console.log(`Toggling light relay to ${newState}`);
       console.log('Exact command being sent:', JSON.stringify(command));
 
-      // Optimistically update UI
+      // Optimistically update UI immediately
       setSystemData(prev => ({
         ...prev,
-        lightRelay: 'unknown',
+        lightRelay: newState.toLowerCase() === 'on' ? 'on' : 'off',
       }));
 
-      // Send the command
+      // Send the command with high priority
       await sendCommand(command, 'high');
       console.log('Light relay toggle command sent');
       addToCommandHistory(command);
 
-      // Request status update to confirm change
+      // Send the command again after a short delay to ensure it is received
+      setTimeout(() => {
+        console.log('Sending light relay command again to ensure reception');
+        sendCommand(command, 'high').catch(error => {
+          console.error('Failed to send follow-up light command:', error);
+        });
+      }, 200);
+
+      // Request status update to confirm change, but don't wait for it to update UI
       setTimeout(() => {
         sendCommand('STATUS', 'high')
           .then(() => addToCommandHistory('STATUS'))
           .catch(error => {
             console.error('Failed to request status after toggle:', error);
           });
-      }, 500);
+      }, 1000); // Increased from 300ms to 1000ms to give more time for light command to take effect
     } catch (error) {
       console.error('Failed to toggle light relay:', error);
       Alert.alert('Error', 'Failed to toggle light relay');
@@ -373,7 +380,6 @@ const ControlScreen = () => {
     }
 
     const newState = systemData.socket1.state === 'on' ? 'OFF' : 'ON';
-    // Make sure there's no extra space and the command is properly formatted
     const command = `R1 ${newState}`;
 
     try {
@@ -381,12 +387,12 @@ const ControlScreen = () => {
       console.log(`Toggling Socket 1 to ${newState}`);
       console.log('Exact command being sent:', JSON.stringify(command));
 
-      // Optimistically update UI
+      // Optimistically update UI immediately
       setSystemData(prev => ({
         ...prev,
         socket1: {
           ...prev.socket1,
-          state: 'unknown',
+          state: newState.toLowerCase() === 'on' ? 'on' : 'off',
         },
       }));
 
@@ -394,14 +400,14 @@ const ControlScreen = () => {
       console.log('Socket 1 toggle command sent');
       addToCommandHistory(command);
 
-      // Request status update to confirm change
+      // Request status update to confirm change, but don't wait for it to update UI
       setTimeout(() => {
         sendCommand('STATUS', 'high')
           .then(() => addToCommandHistory('STATUS'))
           .catch(error => {
             console.error('Failed to request status after toggle:', error);
           });
-      }, 500);
+      }, 300); // Reduced from 500ms to 300ms
     } catch (error) {
       console.error('Failed to toggle Socket 1:', error);
       Alert.alert('Error', 'Failed to toggle Socket 1');
@@ -447,12 +453,12 @@ const ControlScreen = () => {
       console.log(`Toggling Socket 2 to ${newState}`);
       console.log('Exact command being sent:', JSON.stringify(command));
 
-      // Optimistically update UI
+      // Optimistically update UI immediately
       setSystemData(prev => ({
         ...prev,
         socket2: {
           ...prev.socket2,
-          state: 'unknown',
+          state: newState.toLowerCase() === 'on' ? 'on' : 'off',
         },
       }));
 
@@ -460,14 +466,14 @@ const ControlScreen = () => {
       console.log('Socket 2 toggle command sent');
       addToCommandHistory(command);
 
-      // Request status update to confirm change
+      // Request status update to confirm change, but don't wait for it to update UI
       setTimeout(() => {
         sendCommand('STATUS', 'high')
           .then(() => addToCommandHistory('STATUS'))
           .catch(error => {
             console.error('Failed to request status after toggle:', error);
           });
-      }, 500);
+      }, 300); // Reduced from 500ms to 300ms
     } catch (error) {
       console.error('Failed to toggle Socket 2:', error);
       Alert.alert('Error', 'Failed to toggle Socket 2');
