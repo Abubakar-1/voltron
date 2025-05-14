@@ -5,7 +5,6 @@ import {GestureHandlerRootView} from 'react-native-gesture-handler';
 import {BluetoothProvider} from './context/bluetooth-context';
 import {BluetoothPermissions} from './components/bluetooth-permissions';
 import {DashboardScreen} from './screens/dashboard-screen';
-import {ControlScreen} from './screens/control-screen';
 import {SettingsScreen} from './screens/settings-screen';
 import {HistoryScreen} from './screens/history-screen';
 import {useState, useEffect} from 'react';
@@ -149,3 +148,4 @@ const styles = StyleSheet.create({
 });
 
 import {useBluetooth} from './context/bluetooth-context';
+import ControlScreen from './screens/control-screen';

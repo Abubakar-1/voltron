@@ -293,108 +293,6 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     };
   };
 
-  // Process buffered commands
-  const processBufferedCommands = async () => {
-    if (
-      dataBufferRef.current.length === 0 ||
-      !isConnected ||
-      transmissionInProgressRef.current
-    ) {
-      return;
-    }
-
-    // Sort by priority (high first) and then by timestamp (oldest first)
-    const sortedBuffer = [...dataBufferRef.current].sort((a, b) => {
-      if (a.priority !== b.priority) {
-        return a.priority === 'high'
-          ? -1
-          : b.priority === 'high'
-          ? 1
-          : a.priority === 'normal'
-          ? -1
-          : 1;
-      }
-      return a.timestamp - b.timestamp;
-    });
-
-    // Process the next command
-    const nextCommand = sortedBuffer[0];
-
-    // Check if we need to wait before sending (flow control)
-    const now = Date.now();
-    const timeSinceLastTransmission = now - lastTransmissionTimeRef.current;
-    if (timeSinceLastTransmission < minTransmissionIntervalMs) {
-      // Schedule retry after the minimum interval
-      setTimeout(
-        processBufferedCommands,
-        minTransmissionIntervalMs - timeSinceLastTransmission,
-      );
-      return;
-    }
-
-    // Remove from buffer
-    dataBufferRef.current = dataBufferRef.current.filter(
-      cmd =>
-        cmd.command !== nextCommand.command ||
-        cmd.timestamp !== nextCommand.timestamp,
-    );
-    setBufferedCommands(dataBufferRef.current.length);
-
-    // Send the command
-    transmissionInProgressRef.current = true;
-    try {
-      if (isRealDevice && connectedDeviceRef.current) {
-        // Add newline if needed
-        const formattedCommand = nextCommand.command.endsWith('\n')
-          ? nextCommand.command
-          : nextCommand.command + '\n';
-
-        await connectedDeviceRef.current.write(formattedCommand);
-        lastTransmissionTimeRef.current = Date.now();
-
-        // Successful command indicates good connection
-        if (nextCommand.priority !== 'low') {
-          // Don't count keep-alive pings
-          connectionCheckCountRef.current = stableConnectionThreshold;
-        }
-      }
-    } catch (error) {
-      console.error('Error sending buffered command:', error);
-
-      // If it's a high priority command or hasn't been retried too many times, add it back to the buffer
-      if (
-        nextCommand.retries < MAX_RETRIES &&
-        (nextCommand.priority === 'high' || nextCommand.priority === 'normal')
-      ) {
-        dataBufferRef.current.push({
-          ...nextCommand,
-          retries: nextCommand.retries + 1,
-        });
-        setBufferedCommands(dataBufferRef.current.length);
-      }
-
-      // Check connection status
-      if (connectedDeviceRef.current) {
-        try {
-          const stillConnected = await connectedDeviceRef.current.isConnected();
-          if (!stillConnected && isConnected) {
-            handleDisconnection('Connection lost while sending command');
-          }
-        } catch (err) {
-          console.error('Error checking connection after send failure:', err);
-        }
-      }
-    } finally {
-      transmissionInProgressRef.current = false;
-
-      // Process next command if there are more in the buffer
-      if (dataBufferRef.current.length > 0) {
-        // Add a small delay for flow control
-        setTimeout(processBufferedCommands, minTransmissionIntervalMs);
-      }
-    }
-  };
-
   // Handle disconnection with proper error message
   const handleDisconnection = (errorMessage: string) => {
     // Update connection state
@@ -517,7 +415,7 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     };
   }, [isConnected]);
 
-  // Modify the setupDataListener function to add detailed logging
+  // Modify the setupDataListener function to handle the actual data format
   const setupDataListener = (device: BluetoothDevice) => {
     // Remove any existing subscription
     if (dataSubscriptionRef.current) {
@@ -541,28 +439,51 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
         timestamp: new Date().toISOString(),
       });
 
-      // Parse commands if they contain newlines
-      if (data.data.includes('\n')) {
-        const lines = data.data.split('\n');
+      // The device uses \r (carriage return) as line endings
+      if (data.data.includes('\r')) {
+        const lines = data.data.split('\r');
         lines.forEach(line => {
-          if (line.trim()) {
-            console.log('📌 PARSED COMMAND:', line.trim());
+          const trimmedLine = line.trim();
+          if (trimmedLine) {
+            console.log('📌 PARSED LINE:', trimmedLine);
 
-            // Process specific commands
-            if (line.startsWith('POWER:')) {
-              const powerValue = parseFloat(line.substring(6));
-              console.log(
-                '💡 POWER STATE:',
-                powerValue > 0 ? 'ON' : 'OFF',
-                powerValue,
+            // Process specific data lines
+            if (trimmedLine.startsWith('Light relay:')) {
+              const status = trimmedLine.includes('ON') ? 'ON' : 'OFF';
+              console.log('💡 LIGHT RELAY:', status);
+            } else if (trimmedLine.startsWith('Socket 1:')) {
+              const parts = trimmedLine.split(',');
+              const status = parts[0].includes('ON') ? 'ON' : 'OFF';
+              const power = Number.parseFloat(parts[1].trim().replace('W', ''));
+              const energy = Number.parseFloat(parts[2].trim().split(' ')[0]);
+              const cost = Number.parseFloat(parts[3].trim().replace('₦', ''));
+
+              console.log('🔌 SOCKET 1:', {status, power, energy, cost});
+            } else if (trimmedLine.startsWith('Socket 2:')) {
+              const parts = trimmedLine.split(',');
+              const status = parts[0].includes('ON') ? 'ON' : 'OFF';
+              const power = Number.parseFloat(parts[1].trim().replace('W', ''));
+              const energy = Number.parseFloat(parts[2].trim().split(' ')[0]);
+              const cost = Number.parseFloat(parts[3].trim().replace('₦', ''));
+
+              console.log('🔌 SOCKET 2:', {status, power, energy, cost});
+            } else if (trimmedLine.startsWith('Total energy:')) {
+              const energy = Number.parseFloat(
+                trimmedLine.split(':')[1].trim().split(' ')[0],
               );
-              // You could dispatch an event or update state here
-            } else if (line.startsWith('ENERGY:')) {
-              const energyValue = parseFloat(line.substring(7));
-              console.log('⚡ ENERGY VALUE:', energyValue);
-            } else if (line.startsWith('COST:')) {
-              const costValue = parseFloat(line.substring(5));
-              console.log('💰 COST VALUE:', costValue);
+              console.log('⚡ TOTAL ENERGY:', energy);
+            } else if (trimmedLine.startsWith('Total power:')) {
+              const power = Number.parseFloat(
+                trimmedLine.split(':')[1].trim().split(' ')[0],
+              );
+              console.log('⚡ TOTAL POWER:', power);
+            } else if (trimmedLine.startsWith('Total cost:')) {
+              const cost = Number.parseFloat(
+                trimmedLine.split(':')[1].trim().replace('₦', ''),
+              );
+              console.log('💰 TOTAL COST:', cost);
+            } else if (trimmedLine.startsWith('WARNING:')) {
+              console.log('⚠️ WARNING:', trimmedLine.substring(8).trim());
             }
           }
         });
@@ -1165,6 +1086,7 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     }
   };
 
+  // Modify the sendCommand function to ensure proper line endings
   const sendCommand = async (
     command: string,
     priority: 'high' | 'normal' | 'low' = 'normal',
@@ -1188,52 +1110,6 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     // Add to buffer
     dataBufferRef.current.push(bufferedCommand);
 
-    // Trim buffer if it gets too large (remove oldest low priority commands first)
-    if (dataBufferRef.current.length > MAX_BUFFER_SIZE) {
-      // Find low priority commands
-      const lowPriorityCommands = dataBufferRef.current.filter(
-        cmd => cmd.priority === 'low',
-      );
-
-      if (lowPriorityCommands.length > 0) {
-        // Remove the oldest low priority command
-        const oldestLowPriority = lowPriorityCommands.reduce(
-          (oldest, current) =>
-            current.timestamp < oldest.timestamp ? current : oldest,
-          lowPriorityCommands[0],
-        );
-
-        dataBufferRef.current = dataBufferRef.current.filter(
-          cmd =>
-            cmd.command !== oldestLowPriority.command ||
-            cmd.timestamp !== oldestLowPriority.timestamp,
-        );
-      } else {
-        // If no low priority commands, remove the oldest normal priority
-        const normalPriorityCommands = dataBufferRef.current.filter(
-          cmd => cmd.priority === 'normal',
-        );
-
-        if (normalPriorityCommands.length > 0) {
-          const oldestNormalPriority = normalPriorityCommands.reduce(
-            (oldest, current) =>
-              current.timestamp < oldest.timestamp ? current : oldest,
-            normalPriorityCommands[0],
-          );
-
-          dataBufferRef.current = dataBufferRef.current.filter(
-            cmd =>
-              cmd.command !== oldestNormalPriority.command ||
-              cmd.timestamp !== oldestNormalPriority.timestamp,
-          );
-        } else {
-          // If only high priority commands, remove the oldest one
-          dataBufferRef.current.sort((a, b) => a.timestamp - b.timestamp);
-          dataBufferRef.current.shift();
-        }
-      }
-    }
-
     // Update buffered commands count
     setBufferedCommands(dataBufferRef.current.length);
 
@@ -1247,8 +1123,121 @@ export function BluetoothProvider({children}: {children: ReactNode}) {
     processBufferedCommands();
 
     // Return a promise that resolves when the command is processed
-    // This is a bit of a simplification as we don't track individual commands
     return Promise.resolve();
+  };
+
+  // Update the processBufferedCommands function to ensure proper line endings
+  const processBufferedCommands = async () => {
+    if (
+      dataBufferRef.current.length === 0 ||
+      !isConnected ||
+      transmissionInProgressRef.current
+    ) {
+      return;
+    }
+
+    // Sort by priority (high first) and then by timestamp (oldest first)
+    const sortedBuffer = [...dataBufferRef.current].sort((a, b) => {
+      if (a.priority !== b.priority) {
+        return a.priority === 'high'
+          ? -1
+          : b.priority === 'high'
+          ? 1
+          : a.priority === 'normal'
+          ? -1
+          : 1;
+      }
+      return a.timestamp - b.timestamp;
+    });
+
+    // Process the next command
+    const nextCommand = sortedBuffer[0];
+
+    // Check if we need to wait before sending (flow control)
+    const now = Date.now();
+    const timeSinceLastTransmission = now - lastTransmissionTimeRef.current;
+    if (timeSinceLastTransmission < minTransmissionIntervalMs) {
+      // Schedule retry after the minimum interval
+      setTimeout(
+        processBufferedCommands,
+        minTransmissionIntervalMs - timeSinceLastTransmission,
+      );
+      return;
+    }
+
+    // Remove from buffer
+    dataBufferRef.current = dataBufferRef.current.filter(
+      cmd =>
+        cmd.command !== nextCommand.command ||
+        cmd.timestamp !== nextCommand.timestamp,
+    );
+    setBufferedCommands(dataBufferRef.current.length);
+
+    // Send the command
+    transmissionInProgressRef.current = true;
+    try {
+      if (isRealDevice && connectedDeviceRef.current) {
+        // Log the exact command being sent for debugging
+        console.log(
+          'EXACT COMMAND BEING SENT:',
+          JSON.stringify(nextCommand.command),
+        );
+
+        // The ESP32 code expects commands to end with a newline
+        // Make sure to add a newline if not present
+        const formattedCommand = nextCommand.command.endsWith('\n')
+          ? nextCommand.command
+          : nextCommand.command + '\n';
+
+        console.log(
+          'FORMATTED COMMAND WITH NEWLINE:',
+          JSON.stringify(formattedCommand),
+        );
+
+        await connectedDeviceRef.current.write(formattedCommand);
+        lastTransmissionTimeRef.current = Date.now();
+
+        // Successful command indicates good connection
+        if (nextCommand.priority !== 'low') {
+          // Don't count keep-alive pings
+          connectionCheckCountRef.current = stableConnectionThreshold;
+        }
+      }
+    } catch (error) {
+      console.error('Error sending buffered command:', error);
+
+      // If it's a high priority command or hasn't been retried too many times, add it back to the buffer
+      if (
+        nextCommand.retries < MAX_RETRIES &&
+        (nextCommand.priority === 'high' || nextCommand.priority === 'normal')
+      ) {
+        dataBufferRef.current.push({
+          ...nextCommand,
+          retries: nextCommand.retries + 1,
+        });
+        setBufferedCommands(dataBufferRef.current.length);
+      }
+
+      // Check connection status
+      if (connectedDeviceRef.current) {
+        try {
+          const stillConnected = await connectedDeviceRef.current.isConnected();
+          if (!stillConnected && isConnected) {
+            handleDisconnection('Connection lost while sending command');
+          }
+        } catch (err) {
+          console.error('Error checking connection after send failure:', err);
+        }
+      }
+    } finally {
+      transmissionInProgressRef.current = false;
+
+      // Process next command if there are more in the buffer
+      if (dataBufferRef.current.length > 0) {
+        // Add a small delay for flow control
+        setTimeout(processBufferedCommands, minTransmissionIntervalMs);
+      }
+    }
   };
 
   const clearReceivedData = () => {

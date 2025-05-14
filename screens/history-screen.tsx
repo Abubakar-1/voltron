@@ -1,93 +1,321 @@
 'use client';
 
-import {useState} from 'react';
+import {useState, useEffect} from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/Feather';
+import {useBluetooth} from '../context/bluetooth-context';
+
+// Define the data structure for energy history
+interface EnergyRecord {
+  timestamp: Date;
+  socket1Power: number;
+  socket2Power: number;
+  socket1Energy: number;
+  socket2Energy: number;
+  socket1Cost: number;
+  socket2Cost: number;
+}
 
 export function HistoryScreen() {
+  const {isConnected, receivedData, lastUpdated} = useBluetooth();
   const [timeRange, setTimeRange] = useState('day');
   const [chartType, setChartType] = useState('energy');
+  const [energyHistory, setEnergyHistory] = useState<EnergyRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [summaryData, setSummaryData] = useState({
+    totalEnergy: 0,
+    totalCost: 0,
+    averageDailyUsage: 0,
+    peakPower: 0,
+    socket1Usage: 0,
+    socket2Usage: 0,
+    socket1Percentage: 0,
+    socket2Percentage: 0,
+  });
 
-  // Generate mock data based on time range
-  const generateEnergyData = () => {
-    let data = [];
+  // Process received data to update energy history
+  useEffect(() => {
+    if (isConnected && receivedData) {
+      const lines = receivedData.split('\r');
+      let socket1Power = 0;
+      let socket2Power = 0;
+      let socket1Energy = 0;
+      let socket2Energy = 0;
+      let socket1Cost = 0;
+      let socket2Cost = 0;
+      let dataUpdated = false;
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) {
+          continue;
+        }
+
+        // Parse socket data
+        if (trimmedLine.startsWith('Socket 1:')) {
+          try {
+            const parts = trimmedLine.split(',');
+            const powerMatch = parts[1].trim().replace('W', '');
+            const energyMatch = parts[2].trim().split(' ')[0];
+            const costMatch = parts[3].trim().replace('₦', '');
+
+            socket1Power = powerMatch ? Number.parseFloat(powerMatch) : 0;
+            socket1Energy = energyMatch ? Number.parseFloat(energyMatch) : 0;
+            socket1Cost = costMatch ? Number.parseFloat(costMatch) : 0;
+            dataUpdated = true;
+          } catch (error) {
+            console.error('Error parsing Socket 1 data:', error);
+          }
+        }
+
+        if (trimmedLine.startsWith('Socket 2:')) {
+          try {
+            const parts = trimmedLine.split(',');
+            const powerMatch = parts[1].trim().replace('W', '');
+            const energyMatch = parts[2].trim().split(' ')[0];
+            const costMatch = parts[3].trim().replace('₦', '');
+
+            socket2Power = powerMatch ? Number.parseFloat(powerMatch) : 0;
+            socket2Energy = energyMatch ? Number.parseFloat(energyMatch) : 0;
+            socket2Cost = costMatch ? Number.parseFloat(costMatch) : 0;
+            dataUpdated = true;
+          } catch (error) {
+            console.error('Error parsing Socket 2 data:', error);
+          }
+        }
+      }
+
+      // If we have new data, add it to the history
+      if (dataUpdated && lastUpdated) {
+        // Only add a new record every 5 minutes to avoid too many data points
+        const shouldAddRecord =
+          energyHistory.length === 0 ||
+          Date.now() -
+            energyHistory[energyHistory.length - 1].timestamp.getTime() >
+            5 * 60 * 1000;
+
+        if (shouldAddRecord) {
+          const newRecord: EnergyRecord = {
+            timestamp: new Date(),
+            socket1Power,
+            socket2Power,
+            socket1Energy,
+            socket2Energy,
+            socket1Cost,
+            socket2Cost,
+          };
+
+          setEnergyHistory(prev => {
+            // Keep only the last 24 hours of data (288 points at 5-minute intervals)
+            const newHistory = [...prev, newRecord];
+            if (newHistory.length > 288) {
+              return newHistory.slice(newHistory.length - 288);
+            }
+            return newHistory;
+          });
+        }
+
+        // Update summary data
+        updateSummaryData(
+          socket1Energy,
+          socket2Energy,
+          socket1Cost,
+          socket2Cost,
+          socket1Power,
+          socket2Power,
+        );
+      }
+    }
+  }, [isConnected, receivedData, lastUpdated]);
+
+  // Update summary data
+  const updateSummaryData = (
+    socket1Energy: number,
+    socket2Energy: number,
+    socket1Cost: number,
+    socket2Cost: number,
+    socket1Power: number,
+    socket2Power: number,
+  ) => {
+    const totalEnergy = socket1Energy + socket2Energy;
+    const totalCost = socket1Cost + socket2Cost;
+    const socket1Percentage =
+      totalEnergy > 0 ? (socket1Energy / totalEnergy) * 100 : 0;
+    const socket2Percentage =
+      totalEnergy > 0 ? (socket2Energy / totalEnergy) * 100 : 0;
+
+    // Calculate peak power from history
+    const peakPower = Math.max(
+      ...energyHistory.map(record =>
+        Math.max(record.socket1Power, record.socket2Power),
+      ),
+      socket1Power,
+      socket2Power,
+    );
+
+    // Calculate average daily usage (based on available data)
+    const averageDailyUsage = totalEnergy / 3; // Assuming 3 days of data for now
+
+    setSummaryData({
+      totalEnergy,
+      totalCost,
+      averageDailyUsage,
+      peakPower,
+      socket1Usage: socket1Energy,
+      socket2Usage: socket2Energy,
+      socket1Percentage,
+      socket2Percentage,
+    });
+  };
+
+  // Generate chart data based on time range and history
+  const generateChartData = () => {
+    if (energyHistory.length === 0) {
+      return [];
+    }
+
+    const data = [];
+    const now = new Date();
 
     if (timeRange === 'day') {
-      // Hourly data for 24 hours
-      data = [
-        {time: '00:00', socket1: 0.02, socket2: 0.03},
-        {time: '06:00', socket1: 0.03, socket2: 0.05},
-        {time: '12:00', socket1: 0.04, socket2: 0.07},
-        {time: '18:00', socket1: 0.03, socket2: 0.06},
-        {time: '24:00', socket1: 0.02, socket2: 0.04},
-      ];
+      // Last 24 hours data in 6-hour intervals
+      const intervals = 4;
+      for (let i = 0; i < intervals; i++) {
+        const timeLabel = `${(18 - i * 6) % 24}:00`;
+        const timePoint = new Date(now);
+        timePoint.setHours(now.getHours() - i * 6);
+
+        // Find records in this interval
+        const relevantRecords = energyHistory.filter(
+          record =>
+            record.timestamp >=
+              new Date(timePoint.getTime() - 6 * 60 * 60 * 1000) &&
+            record.timestamp <= timePoint,
+        );
+
+        if (relevantRecords.length > 0) {
+          // Use the latest record in the interval
+          const latestRecord = relevantRecords[relevantRecords.length - 1];
+          data.unshift({
+            time: timeLabel,
+            socket1:
+              chartType === 'energy'
+                ? latestRecord.socket1Energy
+                : latestRecord.socket1Cost,
+            socket2:
+              chartType === 'energy'
+                ? latestRecord.socket2Energy
+                : latestRecord.socket2Cost,
+          });
+        } else {
+          // No data for this interval
+          data.unshift({
+            time: timeLabel,
+            socket1: 0,
+            socket2: 0,
+          });
+        }
+      }
     } else if (timeRange === 'week') {
-      // Daily data for a week
-      data = [
-        {time: 'Mon', socket1: 0.2, socket2: 0.3},
-        {time: 'Tue', socket1: 0.3, socket2: 0.4},
-        {time: 'Wed', socket1: 0.4, socket2: 0.5},
-        {time: 'Thu', socket1: 0.3, socket2: 0.6},
-        {time: 'Fri', socket1: 0.5, socket2: 0.7},
-        {time: 'Sat', socket1: 0.4, socket2: 0.5},
-        {time: 'Sun', socket1: 0.3, socket2: 0.4},
-      ];
+      // Last 7 days data
+      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      for (let i = 0; i < 7; i++) {
+        const dayIndex = (now.getDay() - i + 7) % 7;
+        const dayName = dayNames[dayIndex];
+        const dayStart = new Date(now);
+        dayStart.setDate(now.getDate() - i);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setHours(23, 59, 59, 999);
+
+        // Find records for this day
+        const relevantRecords = energyHistory.filter(
+          record => record.timestamp >= dayStart && record.timestamp <= dayEnd,
+        );
+
+        if (relevantRecords.length > 0) {
+          // Use the latest record for the day
+          const latestRecord = relevantRecords[relevantRecords.length - 1];
+          data.unshift({
+            time: dayName,
+            socket1:
+              chartType === 'energy'
+                ? latestRecord.socket1Energy
+                : latestRecord.socket1Cost,
+            socket2:
+              chartType === 'energy'
+                ? latestRecord.socket2Energy
+                : latestRecord.socket2Cost,
+          });
+        } else {
+          // No data for this day
+          data.unshift({
+            time: dayName,
+            socket1: 0,
+            socket2: 0,
+          });
+        }
+      }
     } else if (timeRange === 'month') {
-      // Weekly data for a month
-      data = [
-        {time: 'Week 1', socket1: 1.2, socket2: 1.8},
-        {time: 'Week 2', socket1: 1.5, socket2: 2.1},
-        {time: 'Week 3', socket1: 1.3, socket2: 1.9},
-        {time: 'Week 4', socket1: 1.4, socket2: 2.0},
-      ];
+      // Last 4 weeks data
+      for (let i = 0; i < 4; i++) {
+        const weekLabel = `Week ${4 - i}`;
+        const weekStart = new Date(now);
+        weekStart.setDate(now.getDate() - i * 7 - 7);
+        const weekEnd = new Date(now);
+        weekEnd.setDate(now.getDate() - i * 7);
+
+        // Find records for this week
+        const relevantRecords = energyHistory.filter(
+          record =>
+            record.timestamp >= weekStart && record.timestamp <= weekEnd,
+        );
+
+        if (relevantRecords.length > 0) {
+          // Use the latest record for the week
+          const latestRecord = relevantRecords[relevantRecords.length - 1];
+          data.unshift({
+            time: weekLabel,
+            socket1:
+              chartType === 'energy'
+                ? latestRecord.socket1Energy
+                : latestRecord.socket1Cost,
+            socket2:
+              chartType === 'energy'
+                ? latestRecord.socket2Energy
+                : latestRecord.socket2Cost,
+          });
+        } else {
+          // No data for this week
+          data.unshift({
+            time: weekLabel,
+            socket1: 0,
+            socket2: 0,
+          });
+        }
+      }
     }
 
     return data;
   };
 
-  const generateCostData = () => {
-    let data = [];
-
-    if (timeRange === 'day') {
-      data = [
-        {time: '00:00', socket1: 4, socket2: 6},
-        {time: '06:00', socket1: 6, socket2: 9},
-        {time: '12:00', socket1: 8, socket2: 12},
-        {time: '18:00', socket1: 7, socket2: 10},
-        {time: '24:00', socket1: 5, socket2: 8},
-      ];
-    } else if (timeRange === 'week') {
-      data = [
-        {time: 'Mon', socket1: 40, socket2: 60},
-        {time: 'Tue', socket1: 50, socket2: 75},
-        {time: 'Wed', socket1: 60, socket2: 90},
-        {time: 'Thu', socket1: 55, socket2: 85},
-        {time: 'Fri', socket1: 70, socket2: 100},
-        {time: 'Sat', socket1: 65, socket2: 95},
-        {time: 'Sun', socket1: 45, socket2: 70},
-      ];
-    } else if (timeRange === 'month') {
-      data = [
-        {time: 'Week 1', socket1: 250, socket2: 380},
-        {time: 'Week 2', socket1: 300, socket2: 450},
-        {time: 'Week 3', socket1: 280, socket2: 420},
-        {time: 'Week 4', socket1: 290, socket2: 430},
-      ];
-    }
-
-    return data;
-  };
-
-  // Render a simple chart using Views instead of SVG
+  // Render a simple chart using Views
   const renderSimpleChart = () => {
-    const data =
-      chartType === 'energy' ? generateEnergyData() : generateCostData();
+    const data = generateChartData();
+    if (data.length === 0) {
+      return (
+        <View style={styles.emptyChartContainer}>
+          <Text style={styles.emptyChartText}>No data available</Text>
+        </View>
+      );
+    }
+
     const maxValue = Math.max(
       ...data.map(item => Math.max(item.socket1, item.socket2)),
     );
@@ -114,7 +342,9 @@ export function HistoryScreen() {
                     style={[
                       styles.bar,
                       {
-                        height: `${(item.socket1 / maxValue) * 100}%`,
+                        height: `${
+                          maxValue > 0 ? (item.socket1 / maxValue) * 100 : 0
+                        }%`,
                         backgroundColor: '#3b82f6',
                       },
                     ]}
@@ -123,7 +353,9 @@ export function HistoryScreen() {
                     style={[
                       styles.bar,
                       {
-                        height: `${(item.socket2 / maxValue) * 100}%`,
+                        height: `${
+                          maxValue > 0 ? (item.socket2 / maxValue) * 100 : 0
+                        }%`,
                         backgroundColor: '#ef4444',
                       },
                     ]}
@@ -159,7 +391,6 @@ export function HistoryScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleContainer}>
-            <Icon name="clock" size={16} color="#0070f3" />
             <Text style={styles.cardTitle}>Usage History</Text>
           </View>
           <View style={styles.timeRangeSelector}>
@@ -238,7 +469,13 @@ export function HistoryScreen() {
           </TouchableOpacity>
         </View>
 
-        {renderSimpleChart()}
+        {isLoading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#0070f3" />
+          </View>
+        ) : (
+          renderSimpleChart()
+        )}
 
         <View style={styles.chartFooter}>
           <Text style={styles.chartFooterText}>
@@ -250,34 +487,47 @@ export function HistoryScreen() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleContainer}>
-            <Icon name="calendar" size={16} color="#0070f3" />
             <Text style={styles.cardTitle}>Usage Summary</Text>
           </View>
         </View>
         <View style={styles.summaryContainer}>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Total Energy:</Text>
-            <Text style={styles.summaryValue}>1.32 kWh</Text>
+            <Text style={styles.summaryValue}>
+              {summaryData.totalEnergy.toFixed(3)} kWh
+            </Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Total Cost:</Text>
-            <Text style={styles.summaryValue}>₦276.54</Text>
+            <Text style={styles.summaryValue}>
+              ₦{summaryData.totalCost.toFixed(2)}
+            </Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Average Daily Usage:</Text>
-            <Text style={styles.summaryValue}>0.44 kWh</Text>
+            <Text style={styles.summaryValue}>
+              {summaryData.averageDailyUsage.toFixed(3)} kWh
+            </Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Peak Power:</Text>
-            <Text style={styles.summaryValue}>270.5 W</Text>
+            <Text style={styles.summaryValue}>
+              {summaryData.peakPower.toFixed(1)} W
+            </Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Socket 1 Usage:</Text>
-            <Text style={styles.summaryValue}>0.51 kWh (38.6%)</Text>
+            <Text style={styles.summaryValue}>
+              {summaryData.socket1Usage.toFixed(3)} kWh (
+              {summaryData.socket1Percentage.toFixed(1)}%)
+            </Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Socket 2 Usage:</Text>
-            <Text style={styles.summaryValue}>0.81 kWh (61.4%)</Text>
+            <Text style={styles.summaryValue}>
+              {summaryData.socket2Usage.toFixed(3)} kWh (
+              {summaryData.socket2Percentage.toFixed(1)}%)
+            </Text>
           </View>
         </View>
       </View>
@@ -367,6 +617,20 @@ const styles = StyleSheet.create({
     height: 220,
     marginHorizontal: 16,
     flexDirection: 'row',
+  },
+  emptyChartContainer: {
+    height: 220,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyChartText: {
+    color: '#666',
+    fontStyle: 'italic',
+  },
+  loadingContainer: {
+    height: 220,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   chartLegend: {
     flexDirection: 'row',

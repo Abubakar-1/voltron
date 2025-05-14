@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import {useBluetooth} from '../context/bluetooth-context';
 // import Icon from 'react-native-vector-icons/Feather';
@@ -30,11 +31,12 @@ export function DashboardScreen() {
     isOn: false,
   });
   const [lightData, setLightData] = useState({
-    level: 0,
-    threshold: 500,
     isOn: false,
-    isAuto: true,
   });
+  const [powerFactor, setPowerFactor] = useState(0.8);
+  const [totalPower, setTotalPower] = useState(0);
+  const [totalEnergy, setTotalEnergy] = useState(0);
+  const [totalCost, setTotalCost] = useState(0);
   const [lastUpdateTime, setLastUpdateTime] = useState<string>('Never');
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -80,116 +82,112 @@ export function DashboardScreen() {
   useEffect(() => {
     if (isConnected && receivedData) {
       // Process the received data
-      const lines = receivedData.split('\n');
+      const lines = receivedData.split('\r');
 
       for (const line of lines) {
-        // Parse socket data
-        if (line.includes('Socket 1:')) {
-          const isOn = line.includes('ON');
-          const powerMatch = line.match(/(\d+\.\d+)W/);
-          const energyMatch = line.match(/(\d+\.\d+) kWh/);
-          const costMatch = line.match(/₦(\d+\.\d+)/);
+        const trimmedLine = line.trim();
+        if (!trimmedLine) {
+          continue;
+        }
 
-          if (powerMatch || energyMatch || costMatch) {
+        // Parse socket data
+        if (trimmedLine.startsWith('Socket 1:')) {
+          try {
+            const parts = trimmedLine.split(',');
+            const isOn = parts[0].includes('ON');
+            const powerMatch = parts[1].trim().replace('W', '');
+            const energyMatch = parts[2].trim().split(' ')[0];
+            const costMatch = parts[3].trim().replace('₦', '');
+
             setSocket1Data(prev => ({
               ...prev,
               isOn,
-              power: powerMatch ? Number.parseFloat(powerMatch[1]) : prev.power,
+              power: powerMatch ? Number.parseFloat(powerMatch) : prev.power,
               energy: energyMatch
-                ? Number.parseFloat(energyMatch[1])
+                ? Number.parseFloat(energyMatch)
                 : prev.energy,
-              cost: costMatch ? Number.parseFloat(costMatch[1]) : prev.cost,
+              cost: costMatch ? Number.parseFloat(costMatch) : prev.cost,
             }));
+          } catch (error) {
+            console.error('Error parsing Socket 1 data:', error);
           }
         }
 
-        if (line.includes('Socket 2:')) {
-          const isOn = line.includes('ON');
-          const powerMatch = line.match(/(\d+\.\d+)W/);
-          const energyMatch = line.match(/(\d+\.\d+) kWh/);
-          const costMatch = line.match(/₦(\d+\.\d+)/);
+        if (trimmedLine.startsWith('Socket 2:')) {
+          try {
+            const parts = trimmedLine.split(',');
+            const isOn = parts[0].includes('ON');
+            const powerMatch = parts[1].trim().replace('W', '');
+            const energyMatch = parts[2].trim().split(' ')[0];
+            const costMatch = parts[3].trim().replace('₦', '');
 
-          if (powerMatch || energyMatch || costMatch) {
             setSocket2Data(prev => ({
               ...prev,
               isOn,
-              power: powerMatch ? Number.parseFloat(powerMatch[1]) : prev.power,
+              power: powerMatch ? Number.parseFloat(powerMatch) : prev.power,
               energy: energyMatch
-                ? Number.parseFloat(energyMatch[1])
+                ? Number.parseFloat(energyMatch)
                 : prev.energy,
-              cost: costMatch ? Number.parseFloat(costMatch[1]) : prev.cost,
+              cost: costMatch ? Number.parseFloat(costMatch) : prev.cost,
             }));
+          } catch (error) {
+            console.error('Error parsing Socket 2 data:', error);
           }
         }
 
-        // Parse voltage and current data
-        const voltageMatch1 = line.match(/Socket 1.*V:(\d+\.\d+)V/);
-        if (voltageMatch1) {
-          setSocket1Data(prev => ({
-            ...prev,
-            voltage: Number.parseFloat(voltageMatch1[1]),
-          }));
-        }
-
-        const currentMatch1 = line.match(/Socket 1.*I:(\d+\.\d+)A/);
-        if (currentMatch1) {
-          setSocket1Data(prev => ({
-            ...prev,
-            current: Number.parseFloat(currentMatch1[1]),
-          }));
-        }
-
-        const voltageMatch2 = line.match(/Socket 2.*V:(\d+\.\d+)V/);
-        if (voltageMatch2) {
-          setSocket2Data(prev => ({
-            ...prev,
-            voltage: Number.parseFloat(voltageMatch2[1]),
-          }));
-        }
-
-        const currentMatch2 = line.match(/Socket 2.*I:(\d+\.\d+)A/);
-        if (currentMatch2) {
-          setSocket2Data(prev => ({
-            ...prev,
-            current: Number.parseFloat(currentMatch2[1]),
-          }));
-        }
-
-        // Parse light data
-        if (line.includes('Light level:')) {
-          const levelMatch = line.match(/Light level: (\d+)/);
-          if (levelMatch) {
-            setLightData(prev => ({
-              ...prev,
-              level: Number.parseInt(levelMatch[1]),
-            }));
-          }
-        }
-
-        if (line.includes('Light threshold:')) {
-          const thresholdMatch = line.match(/Light threshold: (\d+)/);
-          if (thresholdMatch) {
-            setLightData(prev => ({
-              ...prev,
-              threshold: Number.parseInt(thresholdMatch[1]),
-            }));
-          }
-        }
-
-        if (line.includes('Light relay:')) {
-          const isOn = line.includes('ON');
+        // Parse light relay status
+        if (trimmedLine.startsWith('Light relay:')) {
+          const isOn = trimmedLine.includes('ON');
           setLightData(prev => ({
             ...prev,
             isOn,
           }));
         }
 
-        if (line.includes('Auto mode:')) {
-          const isAuto = line.includes('ON');
-          setLightData(prev => ({
-            ...prev,
-            isAuto,
-          }));
+        // Parse power factor
+        if (trimmedLine.startsWith('Power factor:')) {
+          try {
+            const pf = Number.parseFloat(trimmedLine.split(':')[1].trim());
+            setPowerFactor(pf);
+          } catch (error) {
+            console.error('Error parsing power factor:', error);
+          }
+        }
+
+        // Parse total energy
+        if (trimmedLine.startsWith('Total energy:')) {
+          try {
+            const energy = Number.parseFloat(
+              trimmedLine.split(':')[1].trim().split(' ')[0],
+            );
+            setTotalEnergy(energy);
+          } catch (error) {
+            console.error('Error parsing total energy:', error);
+          }
+        }
+
+        // Parse total power
+        if (trimmedLine.startsWith('Total power:')) {
+          try {
+            const power = Number.parseFloat(
+              trimmedLine.split(':')[1].trim().split(' ')[0],
+            );
+            setTotalPower(power);
+          } catch (error) {
+            console.error('Error parsing total power:', error);
+          }
+        }
+
+        // Parse total cost
+        if (trimmedLine.startsWith('Total cost:')) {
+          try {
+            const cost = Number.parseFloat(
+              trimmedLine.split(':')[1].trim().replace('₦', ''),
+            );
+            setTotalCost(cost);
+          } catch (error) {
+            console.error('Error parsing total cost:', error);
+          }
         }
       }
 
@@ -198,17 +196,13 @@ export function DashboardScreen() {
     }
   }, [isConnected, receivedData]);
 
-  // Request status update every 3 seconds if connected
+  // Request status update when the component mounts
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (isConnected) {
-        sendCommand('STATUS').catch(error => {
-          console.error('Error sending periodic status command:', error);
-        });
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
+    if (isConnected) {
+      sendCommand('STATUS').catch(error => {
+        console.error('Error sending initial status command:', error);
+      });
+    }
   }, [isConnected, sendCommand]);
 
   const handleRefresh = () => {
@@ -232,11 +226,11 @@ export function DashboardScreen() {
               style={styles.refreshButton}
               onPress={handleRefresh}
               disabled={!isConnected || isRefreshing}>
-              {/* {isRefreshing ? (
+              {isRefreshing ? (
                 <ActivityIndicator size="small" color="#0070f3" />
               ) : (
-                <Icon name="refresh-cw" size={18} color="#0070f3" />
-              )} */}
+                <Text style={{color: '#0070f3'}}>↻</Text> // Simple refresh icon
+              )}
             </TouchableOpacity>
           </View>
         )}
@@ -245,33 +239,24 @@ export function DashboardScreen() {
       <View style={styles.summaryRow}>
         <View style={styles.summaryCard}>
           <View style={styles.cardHeader}>
-            {/* <Icon name="activity" size={16} color="#0070f3" /> */}
             <Text style={styles.cardTitle}>Total Power</Text>
           </View>
-          <Text style={styles.cardValue}>
-            {(socket1Data.power + socket2Data.power).toFixed(1)} W
-          </Text>
+          <Text style={styles.cardValue}>{totalPower.toFixed(1)} W</Text>
         </View>
 
         <View style={styles.summaryCard}>
           <View style={styles.cardHeader}>
-            {/* <Icon name="zap" size={16} color="#0070f3" /> */}
             <Text style={styles.cardTitle}>Total Energy</Text>
           </View>
-          <Text style={styles.cardValue}>
-            {(socket1Data.energy + socket2Data.energy).toFixed(2)} kWh
-          </Text>
+          <Text style={styles.cardValue}>{totalEnergy.toFixed(3)} kWh</Text>
         </View>
       </View>
 
       <View style={styles.card}>
         <View style={styles.cardHeader}>
-          {/* <Icon name="dollar-sign" size={16} color="#0070f3" /> */}
           <Text style={styles.cardTitle}>Total Cost</Text>
         </View>
-        <Text style={styles.cardValue}>
-          ₦{(socket1Data.cost + socket2Data.cost).toFixed(2)}
-        </Text>
+        <Text style={styles.cardValue}>₦{totalCost.toFixed(2)}</Text>
       </View>
 
       <View style={styles.card}>
@@ -287,18 +272,11 @@ export function DashboardScreen() {
             </Text>
           </View>
         </View>
-        {/* <PowerMeter value={socket1Data.power} max={2000} /> */}
         <View style={styles.socketDetails}>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Voltage:</Text>
+            <Text style={styles.detailLabel}>Power:</Text>
             <Text style={styles.detailValue}>
-              {socket1Data.voltage.toFixed(1)} V
-            </Text>
-          </View>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Current:</Text>
-            <Text style={styles.detailValue}>
-              {socket1Data.current.toFixed(2)} A
+              {socket1Data.power.toFixed(1)} W
             </Text>
           </View>
           <View style={styles.detailRow}>
@@ -329,18 +307,11 @@ export function DashboardScreen() {
             </Text>
           </View>
         </View>
-        {/* <PowerMeter value={socket2Data.power} max={2000} /> */}
         <View style={styles.socketDetails}>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Voltage:</Text>
+            <Text style={styles.detailLabel}>Power:</Text>
             <Text style={styles.detailValue}>
-              {socket2Data.voltage.toFixed(1)} V
-            </Text>
-          </View>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Current:</Text>
-            <Text style={styles.detailValue}>
-              {socket2Data.current.toFixed(2)} A
+              {socket2Data.power.toFixed(1)} W
             </Text>
           </View>
           <View style={styles.detailRow}>
@@ -374,13 +345,7 @@ export function DashboardScreen() {
         <View style={styles.lightInfo}>
           <View>
             <Text style={styles.lightInfoText}>
-              Light Level: {lightData.level.toFixed(0)}
-            </Text>
-            <Text style={styles.lightInfoText}>
-              Threshold: {lightData.threshold}
-            </Text>
-            <Text style={styles.lightInfoText}>
-              Mode: {lightData.isAuto ? 'Automatic' : 'Manual'}
+              Power Factor: {powerFactor.toFixed(2)}
             </Text>
           </View>
           <View
